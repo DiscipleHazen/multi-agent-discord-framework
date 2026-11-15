@@ -27,21 +27,22 @@ VALID_MIMO_PREFIXES = (
     "wail", "pause", "pauses for a moment", "cough", "softly", "whisper"
 )
 
+# Strips any leading `[SpeakerName ...]:` header (including parenthetical pronouns or Fellow Bot badges)
 LEADING_BOT_HEADER_REGEX = re.compile(
-    r'^\s*\[[a-zA-Z0-9_\-\.\s]{1,40}(?:\(speaking to [^\)]+\))?\]:\s*',
+    r'^\s*\[[^\]\n]{1,140}\]:\s*',
     re.IGNORECASE
 )
 
 LEAKED_CHAT_PREFIX_REGEX = re.compile(
-    r'(?m)^\s*\[[a-zA-Z0-9_\-\.\s]{1,40}(?:\(speaking to [^\)]+\))?\]:\s*',
+    r'(?m)^\s*\[[^\]\n]{1,140}\]:\s*',
     re.IGNORECASE
 )
 
 # Detects when the LLM hallucinates a second speaker turn in the middle of its reply
 HALLUCINATED_MULTI_TURN_CUTOFF_REGEX = re.compile(
     r'(?:'
-    r'\n\s*\[[a-zA-Z0-9_\-\.\s]{2,40}(?:\(speaking to [^\)]+\))?\]:'
-    r'|\s+\[[a-zA-Z0-9_\-\.\s]{2,40}\(speaking to [^\)]+\)\]:'
+    r'\n\s*\[[^\]\n]{2,140}\]:'
+    r'|\s+\[[a-zA-Z0-9_\-\.\s]{2,40}\((?:speaking to|Fellow Bot)[^\]\n]+\]:'
     r'|\s+\*?[A-Z][a-zA-Z0-9_\-]{1,25}:\s+[^:\n]{2,80}?\*?\s*:\s+'
     r'|\s+:\s+(?:Oh\b|Clearly\b|Honestly\b|Wait\b|Well\b|Look\b|Please\b|No\b|Yes\b|I\b|You\b|\*[a-zA-Z])'
     r'|\s*\[?\*?\[?No response[\—\-\:][^\n\]]*\]?\*?'
@@ -51,35 +52,36 @@ HALLUCINATED_MULTI_TURN_CUTOFF_REGEX = re.compile(
 
 # Strips echoed short user inputs at the very start of the bot's reply (e.g. `erm : *glances up*` or `um : *sighs*`)
 ECHOED_INPUT_PREFIX_REGEX = re.compile(
-    r'^\s*(?:[a-zA-Z0-9_\-]{1,20}\s*:\s*)+(?=\*|[A-Z"\'])'
+    r'^\s*(?:[a-zA-Z0-9_\-]{1,20}\s*:\s*)+(?=\*|[A-Z"\'“])'
 )
 
 LEAKED_CONTEXT_TAG_REGEX = re.compile(
     r'\[(?:Replying to [^\]\n]+|Contains (?:GIF|YouTube Video)[^\]\n]*|'
     r'Linked Webpage:[^\]\n]*|'
-    r'System (?:Visual|Context|Glitch|Time)[^\]\n]*|'
+    r'System (?:Visual|Context|Glitch|Time|Memory|Relationship)[^\]\n]*|'
     r'Generated Attached (?:Image|Meme|Voice Audio)[^\]\n]*|'
-    r'Sent (?:GIF|Image|Meme|Audio) of[^\]\n]*)\]\n?',
+    r'Sent (?:GIF|Image|Meme|Audio) of[^\]\n]*|'
+    r'(?:Disposition|Rapport|Affinity|Relationship(?:\s+Catalyst|\s+Dynamic|\s+Archetype)?|Social\s+Contrast|Protective\s+Loyalty)\s*:[^\]\n]*)\]\n?',
     re.IGNORECASE
 )
 
 TRAILING_META_NOTE_REGEX = re.compile(
-    r'(?:\s*\((?:Note|OOC|Meta|Author\'?s?\s*Note|System|Internal\s*Thought)\s*:[^\)]*\)\s*'
-    r'|\s*\[(?:Note|OOC|Meta|Internal\s*Thought)\s*:[^\]]*\]\s*)+$',
+    r'(?:\s*\((?:Note|OOC|Meta|Author[\'’]?s?\s*Note|System|Internal\s*Thought|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\)]*\)\s*'
+    r'|\s*\[(?:Note|OOC|Meta|Internal\s*Thought|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\]]*\]\s*)+$',
     re.IGNORECASE
 )
 
 # Matches lines formatted like novel manuscripts where all spoken segments are wrapped in quotes around *emotes*
 NOVEL_QUOTED_LINE_REGEX = re.compile(
-    r'^(?:\s*(?:\*[^*]+\*|"[^"\n]+"|“[^”\n]+”)[,.;!]?\s*)+$'
+    r'^(?:\s*(?:\*[^*]+\*|"[^"\n]+"|“[^”\n]+”|[?,.;!~]+|(?:>w<|>_<|\^w\^|:3|;3|OwO|UwU|owo|uwu|>\:\())[?,.;!~]*\s*)+$'
 )
 STRAIGHT_QUOTED_SEGMENT_REGEX = re.compile(r'"([^"\n]+)"')
 CURLY_QUOTED_SEGMENT_REGEX = re.compile(r'“([^”\n]+)”')
-UNCLOSED_TRAILING_EMOTE_REGEX = re.compile(r'(?<!\*)\*([a-zA-Z][a-zA-Z\s,\'\-]{2,35})$')
+UNCLOSED_TRAILING_EMOTE_REGEX = re.compile(r'(?<!\*)\*([a-zA-Z][a-zA-Z0-9\s,\'’\-]{2,42})$')
 
 PROMPT_BAKED_TEXT_STRIP_REGEX = re.compile(
     r'(?:,\s*|\s+)(?:with\s+(?:bold\s+|white\s+|impact\s+|top\s+|bottom\s+)*(?:text|caption|captions|words|lettering)\s+'
-    r'(?:reading|saying|that\s+says)\s*[\'"][^\'"]+[\'"])',
+    r'(?:reading|saying|that\s+says)\s*[\'""“][^\"\'”]+[\'""”])',
     re.IGNORECASE
 )
 
@@ -149,7 +151,7 @@ def _strip_outer_novel_quotes(line: str) -> str:
     spoken response (or every spoken segment around *emotes*) in double quotes,
     while preserving legitimate inline quotes inside normal sentences.
     """
-    if not line or ('"' not in line and '“' not in line):
+    if not line or ('"' not in line and '“' not in line and '”' not in line):
         return line
     stripped = line.strip()
     if NOVEL_QUOTED_LINE_REGEX.match(stripped):
@@ -302,6 +304,8 @@ def parse_mimotts_voice_block(
     assistant_speech_content = LEARN_USER_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEARN_GENERAL_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEARN_STRIP_REGEX.sub('', assistant_speech_content)
+    assistant_speech_content = LEAKED_CONTEXT_TAG_REGEX.sub('', assistant_speech_content)
+    assistant_speech_content = TRAILING_META_NOTE_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = MEME_GEN_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = UNCLOSED_MEME_GEN_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = IMAGE_GEN_REGEX.sub('', assistant_speech_content)
@@ -353,11 +357,18 @@ def convert_bracket_emotes_to_asterisks(text: str) -> str:
     def _replace(match):
         inner = match.group(1).strip()
         lower_inner = inner.lower()
-        if lower_inner.startswith((
-            "http", "image_gen", "meme_gen", "voice_msg", "gif",
-            "attached", "contains", "system", "replying", "addressed", "directed",
-            "learn", "no response", "linked webpage", "note:", "ooc:", "meta:"
-        )) or "speaking to" in lower_inner:
+        if (
+            lower_inner.startswith((
+                "http", "image_gen", "meme_gen", "voice_msg", "gif",
+                "attached", "contains", "system", "replying", "addressed", "directed",
+                "learn", "no response", "linked webpage", "note:", "ooc:", "meta:",
+                "disposition:", "rapport:", "affinity:", "relationship:", "catalyst:",
+                "archetype:", "social contrast:"
+            ))
+            or "speaking to" in lower_inner
+            or "fellow bot" in lower_inner
+            or "separate character" in lower_inner
+        ):
             return ""
         return f"*{inner}*"
 
@@ -524,8 +535,12 @@ def parse_meme_gen_tag(raw_meme_str: str) -> tuple[str, str, str]:
 
     cleaned_raw = re.sub(r'\s+', ' ', raw_meme_str.strip()).rstrip(']')
     cleaned_raw = re.sub(r'^\[?\s*(?:MEME_GEN|IMAGE_GEN)\s*:\s*', '', cleaned_raw, flags=re.IGNORECASE).strip()
-    # Strip any trailing nested [GIF: ...] or [IMAGE_GEN: ...] tag if the LLM concatenated two tags
-    cleaned_raw = re.split(r'\[\s*(?:GIF|IMAGE_GEN|VOICE_MSG)\s*:', cleaned_raw, flags=re.IGNORECASE)[0].strip()
+    # Strip any trailing nested media or learning tag if the LLM concatenated two tags
+    cleaned_raw = re.split(
+        r'\[\s*(?:GIF|IMAGE_GEN|VOICE_MSG|LEARN_USER|LEARN_GENERAL|LEARN)\b',
+        cleaned_raw,
+        flags=re.IGNORECASE
+    )[0].strip()
 
     parts = [p.strip().strip('"\'') for p in cleaned_raw.split("|") if p.strip()]
 

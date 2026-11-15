@@ -28,7 +28,7 @@ from media_engine import safe_download_url_bytes, render_meme_captions
 # ==============================================================================
 
 UNICODE_EMOJI_FALLBACK_REGEX = re.compile(
-    r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]'
+    r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]\uFE0F?'
 )
 ALPHANUM_WORD_REGEX = re.compile(r'[a-z0-9]+')
 WHITESPACE_COLLAPSE_REGEX = re.compile(r'\s+')
@@ -55,31 +55,82 @@ CONVERSATIONAL_FILLER_STRIP_REGEX = re.compile(
     re.IGNORECASE
 )
 
+TRAILING_REQUEST_POLITENESS_REGEX = re.compile(
+    r'(?:[\s,]+\b(?:please|pls|plz|thx|thanks|thank\s+you|for\s+me|right\s+now|bro|dude|lol|lmao|don[\'’]?t\s+be\s+nice)\b)+[\s.!?]*$',
+    re.IGNORECASE
+)
+
+NON_VISUAL_REQUEST_TOKENS = frozenset({
+    "please", "pls", "plz", "thx", "thanks", "thank", "really", "super",
+    "very", "just", "maybe", "like", "dont", "nice", "good", "great",
+    "cool", "awesome", "funny", "cute", "little", "big", "make", "draw",
+    "generate", "render", "create", "show", "give", "send", "paint", "sketch"
+})
+
+# Matches non-verbal vocalizations (animal sounds, droid beeps, creature noises, keysmashes)
+# so any non-English persona's English `*emote*` actions are preserved during image prompt synthesis
+NON_VERBAL_VOCALIZATION_REGEX = re.compile(
+    r'^(?:m+r+p+|m+e+o+w+|m+e+w+|p+u+r+|p+r+t+|n+y+a+|h+i+s+|w+o+f+|a+r+f+|b+a+r+k+|'
+    r'g+r+r+|y+i+p+|s+q+u+e+a+k+|c+h+i+r+p+|b+e+p+|b+o+p+|b+z+t+|w+h+i+r+|'
+    r'z+|mlem|ekek\w*|[asdfjkl;0-9\W]+)$',
+    re.IGNORECASE
+)
+
 # SHA-256 Vision cache so reposted images/GIFs/stickers resolve in 0ms with 0 API calls
 _VISION_CACHE_LOCK = threading.RLock()
 _VISION_HASH_CACHE: dict[str, str] = {}
 _MAX_VISION_HASH_ITEMS = 128
 
 
+def _stem_visual_token(w: str) -> str:
+    """Normalizes singular/plural visual nouns ('clouds' -> 'cloud', 'tacos' -> 'taco') for overlap checks."""
+    if len(w) <= 3:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("es") and len(w) > 4 and w[-3] in "sxzho":
+        return w[:-2]
+    if w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        return w[:-1]
+    return w
+
+
 def _normalize_tokens(text: str) -> set[str]:
-    """Internal helper for comparing prompt overlap safely."""
+    """Internal helper for comparing visual prompt overlap safely (with singular/plural stem normalization)."""
     if not text:
         return set()
     words = ALPHANUM_WORD_REGEX.findall(text.lower())
-    return {w for w in words if len(w) > 2 and w not in STOPWORDS}
+    out = set()
+    for w in words:
+        if len(w) > 2 and w not in STOPWORDS and w not in NON_VISUAL_REQUEST_TOKENS:
+            out.add(_stem_visual_token(w))
+    return out
 
 
 def _strip_conversational_filler_from_reply(reply_text: str) -> str:
     """
-    Removes physical `*emotes*` and meta-apology/delay chatter ('oopsie', 'one sec while I sketch',
-    'magic crayons glitch') from `reply_text` so visual prompt synthesis focuses strictly
-    on the actual visual scene being described.
+    Removes physical `*emotes*` and meta-apology/delay chatter ('oopsie', 'one sec while I sketch')
+    from `reply_text` so visual prompt synthesis focuses strictly on the actual visual scene.
+    Preserves the action text inside `*emotes*` if the surrounding text consists only of
+    non-verbal vocalizations (e.g., an animal, pet, or sound-effect persona).
     """
     if not reply_text:
         return ""
-    cleaned = INLINE_EMOTE_STRIP_REGEX.sub(' ', reply_text)
-    cleaned = CONVERSATIONAL_FILLER_STRIP_REGEX.sub(' ', cleaned)
-    return WHITESPACE_COLLAPSE_REGEX.sub(' ', cleaned).strip()
+    without_emotes = INLINE_EMOTE_STRIP_REGEX.sub(' ', reply_text)
+    without_emotes = CONVERSATIONAL_FILLER_STRIP_REGEX.sub(' ', without_emotes)
+    without_emotes = WHITESPACE_COLLAPSE_REGEX.sub(' ', without_emotes).strip()
+
+    # Check if stripping `*emotes*` left only non-verbal noises or fewer than 2 spoken words
+    spoken_words = [
+        w for w in ALPHANUM_WORD_REGEX.findall(without_emotes.lower())
+        if len(w) >= 3 and not NON_VERBAL_VOCALIZATION_REGEX.match(w)
+    ]
+    if len(spoken_words) < 2 and "*" in reply_text:
+        unstarred = reply_text.replace("*", " ")
+        unstarred = CONVERSATIONAL_FILLER_STRIP_REGEX.sub(' ', unstarred)
+        return WHITESPACE_COLLAPSE_REGEX.sub(' ', unstarred).strip()
+
+    return without_emotes
 
 
 async def summarize_image_for_memory(image_bytes: bytes, api_key: str, vision_model: str, api_url: str) -> str:
@@ -183,6 +234,37 @@ def _resolve_emoji_candidate(candidate: str, server_custom_emojis: list[str]) ->
     return c
 
 
+def _build_emoji_rapport_lens(speaker_name: str, speaker_affinity: int, is_speaker_bot: bool) -> str:
+    """
+    Builds a concise, persona-agnostic relationship modifier for emoji selection so silent
+    emoji reactions reflect how the bot feels about the speaker (human or fellow bot).
+    """
+    if not speaker_name:
+        return ""
+    peer_label = "fellow server bot" if is_speaker_bot else "server member"
+    if speaker_affinity >= 45:
+        return (
+            f"RELATIONSHIP WITH SPEAKER ({speaker_name}, {peer_label} | Affinity: +{speaker_affinity}/100 — Trusted Inner Circle / Bonded Companion): "
+            "You are genuinely fond of and loyal to them! Lean toward warmer, supportive, hyped, or affectionate emojis that fit your persona.\n\n"
+        )
+    if speaker_affinity >= 15:
+        return (
+            f"RELATIONSHIP WITH SPEAKER ({speaker_name}, {peer_label} | Affinity: +{speaker_affinity}/100 — Warming Friend / Friendly Ally): "
+            "You enjoy their company and banter! Lean toward amused, playful, or appreciative emojis in-character.\n\n"
+        )
+    if speaker_affinity <= -30:
+        return (
+            f"RELATIONSHIP WITH SPEAKER ({speaker_name}, {peer_label} | Affinity: {speaker_affinity}/100 — Active Rival / Cold): "
+            "You are unimpressed or annoyed with them! Lean toward side-eye, eye-roll, skeptical, or dismissive emojis in-character.\n\n"
+        )
+    if speaker_affinity <= -8:
+        return (
+            f"RELATIONSHIP WITH SPEAKER ({speaker_name}, {peer_label} | Affinity: {speaker_affinity}/100 — Comedic Foil / Sparring Rival): "
+            "They are your teasing foil/rival! Lean toward cheeky, skeptical, smug, or eye-rolling emojis that match the banter.\n\n"
+        )
+    return ""
+
+
 async def get_contextual_emojis(
     api_key: str,
     text: str,
@@ -196,7 +278,10 @@ async def get_contextual_emojis(
     bot_name: str,
     other_bot_keywords: set[str],
     emoji_reaction_hint: str = "",
-    existing_reactions: set[str] | None = None
+    existing_reactions: set[str] | None = None,
+    speaker_name: str = "",
+    speaker_affinity: int = 0,
+    is_speaker_bot: bool = False
 ) -> list[str]:
     filtered_custom_emojis = []
     for em in (server_custom_emojis or []):
@@ -246,10 +331,12 @@ async def get_contextual_emojis(
             "Pick an emoji that matches both the specific detail/joke of the message (text, image, meme, or GIF) and your character's attitude.\n\n"
         )
     )
+    rapport_lens = _build_emoji_rapport_lens(speaker_name, speaker_affinity, is_speaker_bot)
 
     system_message = (
         f"YOUR PERSONA:\n{personality_prompt[:950]}\n\n"
         f"{style_guidance}"
+        f"{rapport_lens}"
         f"{history_summary}"
         "TASK: Select 3 contextually sharp emojis ranked from best to backup that react directly to the specific content, image description, GIF, or punchline of the latest message.\n\n"
         "STRICT REACTION RULES:\n"
@@ -269,8 +356,17 @@ async def get_contextual_emojis(
     else:
         user_content = prompt_text
 
+    endpoint_label = api_url.rsplit("/", 1)[-1] if api_url else "completions"
+    active_emoji_model = model
+    if is_model_circuit_open(f"{endpoint_label}:{model}"):
+        fb_list = FALLBACK_VISION_MODELS if image_bytes else FALLBACK_TEXT_MODELS
+        for fb_m in fb_list:
+            if fb_m != model:
+                active_emoji_model = fb_m
+                break
+
     payload = {
-        "model": model,
+        "model": active_emoji_model,
         "messages": [
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_content}
@@ -311,10 +407,10 @@ async def get_contextual_emojis(
 
 async def auto_react(message: discord.Message, **kwargs) -> str | None:
     """
-    Selects and applies an in-character emoji reaction to `message`.
+    Selects and applies an in-character, relationship-aware emoji reaction to `message`.
     Optimization: If `text` already contains `[Attached Media Description: ...]` from the
     shared Vision cache, uses the fast `text_model` instead of uploading the base64 image
-    to the 235B Vision model a second time.
+    to the Vision model a second time.
     """
     if not message.guild or message.author == message.guild.me:
         return None
@@ -343,7 +439,10 @@ async def auto_react(message: discord.Message, **kwargs) -> str | None:
         bot_name=bot_name,
         other_bot_keywords=kwargs.get("other_bot_keywords", set()),
         emoji_reaction_hint=kwargs.get("emoji_reaction_hint", ""),
-        existing_reactions=existing_reactions
+        existing_reactions=existing_reactions,
+        speaker_name=getattr(message.author, "display_name", ""),
+        speaker_affinity=int(kwargs.get("speaker_affinity", 0) or 0),
+        is_speaker_bot=bool(getattr(message.author, "bot", False))
     )
 
     for emoji in context_emojis:
@@ -369,7 +468,7 @@ def _extract_explicit_requested_subject(
     If a user explicitly asked for an image/meme of a specific subject
     (e.g. 'could you draw me a picture of the clouds?' followed by 'hm' or 'pls'),
     scans all lines in `user_prompt` (and the last 3 user turns in `raw_history` if
-    a follow-up like 'uwu pls' is nudging an earlier request) to extract the exact
+    a short follow-up is nudging an earlier request) to extract the exact
     subject description unless the user asked for a picture of the bot itself.
     """
     candidate_lines = []
@@ -392,12 +491,19 @@ def _extract_explicit_requested_subject(
                         if clean_ln and clean_ln not in candidate_lines:
                             candidate_lines.append(clean_ln)
 
-    self_refs = {"you", "yourself", "urself", bot_name.lower(), bot_name.split()[0].lower()}
+    bot_low = (bot_name or "").strip().lower()
+    self_refs = {"you", "yourself", "urself", bot_low}
+    if bot_low and "'s " not in bot_low and "’s " not in bot_low:
+        first_w = bot_low.split()[0]
+        if len(first_w) >= 3:
+            self_refs.add(first_w)
+
     for line in candidate_lines:
         m = USER_SUBJECT_EXTRACT_REGEX.search(line)
         if not m:
             continue
         subj = m.group(1).strip().rstrip(".!?")
+        subj = TRAILING_REQUEST_POLITENESS_REGEX.sub('', subj).strip().rstrip(",.!?")
         if not subj or len(subj) < 3:
             continue
         subj_lower = subj.lower()
@@ -453,7 +559,7 @@ async def ensure_unique_image_prompt(
         overlap = len(proposed_tokens & prev_tokens) / float(min(len(proposed_tokens), len(prev_tokens)))
         shared_count = len(proposed_tokens & prev_tokens)
 
-        # Stricter threshold for the same bot when unsolicited so it doesn't draw 3 waffles in a row
+        # Stricter threshold for the same bot when unsolicited so it doesn't repeat the same visual prop 3 times in a row
         if overlap >= 0.65 or (not requested_subject and is_same_bot and (overlap >= 0.38 or shared_count >= 3)):
             conflicting_prompts.append(f"- {rec.get('bot_name', 'Bot')}: '{prev_prompt}'")
             if is_same_bot and not requested_subject:
@@ -475,7 +581,7 @@ async def ensure_unique_image_prompt(
         subject_directive = (
             f"CRITICAL USER REQUEST FIDELITY: The user explicitly asked for: '{requested_subject}'. "
             "You MUST depict ALL specific subjects, people, items, food, clothing, and actions requested by the user! "
-            "Do NOT replace the user's requested characters or items with the bot's own character or random wizards!\n"
+            "Do NOT replace the user's requested characters or items with the bot's own character!\n"
         )
     elif stale_self_subject or user_asked_topic_change:
         subject_directive = (
@@ -679,7 +785,6 @@ async def synthesize_missing_image_prompt(
     clean_reply_scene = _strip_conversational_filler_from_reply(reply_text)
 
     # Check if this bot generated an image recently so if the user is asking for a correction/fix
-    # (e.g. "shadowstep isnt in wow forever uwu" -> "let me fix that... here's your true rogue path"),
     # the synthesizer knows the previous visual context and updates it!
     last_bot_prompt = ""
     bot_name_low = (bot_name or "").lower()
@@ -960,4 +1065,19 @@ async def synthesize_missing_meme_spec(
                 return v_prompt, t_text, b_text
         except Exception:
             pass
+
+    # Deterministic fallback so an explicit meme request never drops the meme if the secondary API call times out
+    fb_top, fb_bot = _derive_fallback_captions_from_reply(reply_text or user_prompt)
+    req_subj = _extract_explicit_requested_subject(user_prompt, bot_name)
+    fb_scene = (
+        f"Expressive, humorous illustration of {req_subj}, vivid lighting and comedic composition"
+        if req_subj
+        else (
+            f"Expressive, humorous illustration depicting: {clean_reply_scene[:140]}, vivid lighting"
+            if len(clean_reply_scene) >= 8
+            else ""
+        )
+    )
+    if fb_scene and (fb_top or fb_bot):
+        return fb_scene, fb_top, fb_bot
     return None, "", ""

@@ -57,7 +57,8 @@ MEME_CAPTION_PLACEHOLDER_GUARD = frozenset({
     "short top text", "short bottom text", "caption 1", "caption 2",
     "text 1", "text 2", "setup", "punchline", "insert top text",
     "insert bottom text", "insert caption", "none", "n/a", "null",
-    "empty", "no text", "no caption", "blank"
+    "empty", "no text", "no caption", "blank", "witty setup line",
+    "witty punchline", "setup line", "punchline caption", "setup caption"
 })
 
 FONT_CANDIDATES = (
@@ -74,6 +75,7 @@ FONT_CANDIDATES = (
 
 _RESOLVED_FONT_PATH: str | None = None
 _FONT_SIZE_CACHE: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+_MAX_FONT_CACHE_ITEMS = 32
 
 # Hardware & network efficiency caches
 _DECODE_THREAD_SEMAPHORE = threading.BoundedSemaphore(2)
@@ -105,46 +107,75 @@ def _get_cached_processed_media(url_key: str) -> bytes | None:
 
 
 def _get_cached_meme_font(sz: int):
-    """Loads and caches the Impact/bold meme font by pixel size to avoid repeated disk probes."""
+    """Thread-safely loads and caches the Impact/bold meme font by pixel size."""
     global _RESOLVED_FONT_PATH
-    cached_font = _FONT_SIZE_CACHE.get(sz)
-    if cached_font is not None:
-        return cached_font
+    with _CACHE_LOCK:
+        cached_font = _FONT_SIZE_CACHE.get(sz)
+        if cached_font is not None:
+            return cached_font
 
-    if _RESOLVED_FONT_PATH:
+        if _RESOLVED_FONT_PATH:
+            try:
+                f_obj = ImageFont.truetype(_RESOLVED_FONT_PATH, sz)
+                if len(_FONT_SIZE_CACHE) >= _MAX_FONT_CACHE_ITEMS:
+                    _FONT_SIZE_CACHE.pop(next(iter(_FONT_SIZE_CACHE)), None)
+                _FONT_SIZE_CACHE[sz] = f_obj
+                return f_obj
+            except Exception:
+                _RESOLVED_FONT_PATH = None
+
+        for fc in FONT_CANDIDATES:
+            try:
+                f_obj = ImageFont.truetype(fc, sz)
+                _RESOLVED_FONT_PATH = fc
+                if len(_FONT_SIZE_CACHE) >= _MAX_FONT_CACHE_ITEMS:
+                    _FONT_SIZE_CACHE.pop(next(iter(_FONT_SIZE_CACHE)), None)
+                _FONT_SIZE_CACHE[sz] = f_obj
+                return f_obj
+            except Exception:
+                continue
+
         try:
-            f_obj = ImageFont.truetype(_RESOLVED_FONT_PATH, sz)
-            _FONT_SIZE_CACHE[sz] = f_obj
-            return f_obj
-        except Exception:
-            _RESOLVED_FONT_PATH = None
+            f_obj = ImageFont.load_default(size=sz)
+        except TypeError:
+            f_obj = ImageFont.load_default()
+        _FONT_SIZE_CACHE[sz] = f_obj
+        return f_obj
 
-    for fc in FONT_CANDIDATES:
-        try:
-            f_obj = ImageFont.truetype(fc, sz)
-            _RESOLVED_FONT_PATH = fc
-            _FONT_SIZE_CACHE[sz] = f_obj
-            return f_obj
-        except Exception:
-            continue
 
-    try:
-        f_obj = ImageFont.load_default(size=sz)
-    except TypeError:
-        f_obj = ImageFont.load_default()
-    _FONT_SIZE_CACHE[sz] = f_obj
-    return f_obj
+def _infer_video_suffix(name_or_url: str, content_type: str = "") -> str:
+    """Infers the container extension ('.mp4', '.webm', '.mov', '.avi') so OpenCV demuxes accurately."""
+    base = (name_or_url or "").lower().split("?")[0]
+    for ext in VALID_VID_EXTS:
+        if base.endswith(ext):
+            return ext
+    ctype = (content_type or "").lower()
+    if "webm" in ctype:
+        return ".webm"
+    if "quicktime" in ctype or "mov" in ctype:
+        return ".mov"
+    if "avi" in ctype:
+        return ".avi"
+    return ".mp4"
 
 
 def is_visual_media_candidate(message: discord.Message) -> bool:
     """
     Determines whether a Discord message actually contains visual media
-    (attachments, stickers, direct image/video/GIF URLs, or media embeds)
-    rather than a plain webpage/article link, preventing wasted Vision API calls
-    on website favicons or OpenGraph social banners.
+    (image/video attachments, non-JSON stickers, direct image/video/GIF URLs,
+    or media embeds) rather than a plain text file or webpage/article link,
+    preventing wasted Vision locks and API calls.
     """
-    if getattr(message, "attachments", None) or getattr(message, "stickers", None):
-        return True
+    for att in getattr(message, "attachments", []) or []:
+        ctype = (getattr(att, "content_type", "") or "").lower()
+        fname = (getattr(att, "filename", "") or "").lower()
+        if ctype.startswith(("image/", "video/")) or fname.endswith(VALID_IMG_EXTS + VALID_VID_EXTS):
+            return True
+
+    for sticker in getattr(message, "stickers", []) or []:
+        s_url = str(getattr(sticker, "url", "") or "").lower().split("?")[0]
+        if s_url and not s_url.endswith(".json"):
+            return True
 
     content_str = getattr(message, "content", "") or ""
     for url in URL_REGEX.findall(content_str):
@@ -198,16 +229,19 @@ def extract_webpage_embed_context(message: discord.Message) -> str:
             continue
         title = WHITESPACE_NORM_REGEX.sub(' ', str(getattr(embed, "title", "") or "").strip())
         desc = WHITESPACE_NORM_REGEX.sub(' ', str(getattr(embed, "description", "") or "").strip())
+        author_obj = getattr(embed, "author", None)
+        author_name = WHITESPACE_NORM_REGEX.sub(' ', str(getattr(author_obj, "name", "") or "").strip()) if author_obj else ""
         if not title and not desc:
             continue
         if len(desc) > 160:
             desc = desc[:157] + "..."
+        author_clause = f" (by {author_name})" if author_name and author_name.lower() not in title.lower() else ""
         if title and desc:
-            snippets.append(f"[Linked Webpage: '{title}' — {desc}]")
+            snippets.append(f"[Linked Webpage: '{title}'{author_clause} — {desc}]")
         elif title:
-            snippets.append(f"[Linked Webpage: '{title}']")
+            snippets.append(f"[Linked Webpage: '{title}'{author_clause}]")
         elif desc:
-            snippets.append(f"[Linked Webpage: {desc}]")
+            snippets.append(f"[Linked Webpage{author_clause}: {desc}]")
         if len(snippets) >= 2:
             break
     return "\n".join(snippets)
@@ -664,7 +698,8 @@ async def _process_downloaded_media_bytes(raw_bytes: bytes, content_type: str, m
     url_base = (media_url or "").lower().split("?")[0]
     ctype = (content_type or "").lower()
     if ctype.startswith("video/") or url_base.endswith(VALID_VID_EXTS):
-        processed = await asyncio.to_thread(extract_video_frame_bytes, raw_bytes, ".mp4")
+        vid_ext = _infer_video_suffix(url_base, ctype)
+        processed = await asyncio.to_thread(extract_video_frame_bytes, raw_bytes, vid_ext)
         if processed:
             return _cache_processed_media(media_url, processed)
     if ctype.startswith("image/") or url_base.endswith(VALID_IMG_EXTS) or not ctype.startswith("text/"):
@@ -690,9 +725,10 @@ async def fetch_image_bytes_from_message(message: discord.Message) -> bytes | No
         if cached:
             return cached
 
-        url_lower = att.filename.lower()
-        is_image = att.content_type and att.content_type.startswith("image/")
-        is_video = att.content_type and att.content_type.startswith("video/")
+        url_lower = (getattr(att, "filename", "") or "").lower()
+        ctype_lower = (getattr(att, "content_type", "") or "").lower()
+        is_image = ctype_lower.startswith("image/")
+        is_video = ctype_lower.startswith("video/")
 
         if is_image or url_lower.endswith(VALID_IMG_EXTS):
             try:
@@ -705,7 +741,8 @@ async def fetch_image_bytes_from_message(message: discord.Message) -> bytes | No
         elif is_video or url_lower.endswith(VALID_VID_EXTS):
             try:
                 raw = await att.read()
-                processed = await asyncio.to_thread(extract_video_frame_bytes, raw, ".mp4")
+                vid_ext = _infer_video_suffix(url_lower, ctype_lower)
+                processed = await asyncio.to_thread(extract_video_frame_bytes, raw, vid_ext)
                 if processed:
                     return _cache_processed_media(att_url, processed)
             except Exception:
@@ -714,7 +751,7 @@ async def fetch_image_bytes_from_message(message: discord.Message) -> bytes | No
     # 2. Discord Stickers (custom PNG/APNG/GIF server stickers)
     for sticker in getattr(message, "stickers", []):
         sticker_url = getattr(sticker, "url", None)
-        if sticker_url and not str(sticker_url).lower().endswith(".json"):
+        if sticker_url and not str(sticker_url).lower().split("?")[0].endswith(".json"):
             s_url_str = str(sticker_url)
             cached = _get_cached_processed_media(s_url_str)
             if cached:
@@ -805,10 +842,11 @@ async def fetch_image_bytes_from_message(message: discord.Message) -> bytes | No
 
 
 def _sanitize_meme_caption_text(text_str: str) -> str:
-    """Strips any literal placeholder labels like 'TOP CAPTION' before rendering onto an image."""
+    """Strips any literal placeholder labels or leaked bracket tags before rendering onto an image."""
     if not text_str:
         return ""
-    clean = WHITESPACE_NORM_REGEX.sub(' ', text_str.strip()).strip(' "\'*[]<>')
+    stripped_tags = re.sub(r'\[\s*(?:LEARN_USER|LEARN_GENERAL|LEARN|Disposition|Rapport|Affinity|GIF|IMAGE_GEN|VOICE_MSG)[^\]]*\]?', '', text_str, flags=re.IGNORECASE)
+    clean = WHITESPACE_NORM_REGEX.sub(' ', stripped_tags.strip()).strip(' "\'*[]<>')
     if not clean:
         return ""
     low = clean.lower()
@@ -856,111 +894,114 @@ def render_meme_captions(image_bytes: bytes, top_text: str = "", bottom_text: st
 
     clean_top, clean_bottom = _auto_split_single_long_caption(clean_top, clean_bottom)
 
-    try:
-        img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-        draw = ImageDraw.Draw(img)
-        w, h = img.size
+    with _DECODE_THREAD_SEMAPHORE:
+        try:
+            with Image.open(BytesIO(image_bytes)) as raw_img:
+                img = raw_img.convert("RGBA")
+            draw = ImageDraw.Draw(img)
+            w, h = img.size
 
-        def _wrap_lines(words: list[str], font, max_w: int) -> tuple[list[str], int]:
-            lines = []
-            current_line = []
-            widest_line = 0
-            for word in words:
-                test_line = " ".join(current_line + [word])
-                bbox = draw.textbbox((0, 0), test_line, font=font)
-                tw = bbox[2] - bbox[0]
-                if tw <= max_w or not current_line:
-                    current_line.append(word)
-                    widest_line = max(widest_line, tw)
-                else:
+            def _wrap_lines(words: list[str], font, max_w: int) -> tuple[list[str], int]:
+                lines = []
+                current_line = []
+                widest_line = 0
+                for word in words:
+                    test_line = " ".join(current_line + [word])
+                    bbox = draw.textbbox((0, 0), test_line, font=font)
+                    tw = bbox[2] - bbox[0]
+                    if tw <= max_w or not current_line:
+                        current_line.append(word)
+                        widest_line = max(widest_line, tw)
+                    else:
+                        lines.append(" ".join(current_line))
+                        current_line = [word]
+                        w_bbox = draw.textbbox((0, 0), word, font=font)
+                        widest_line = max(widest_line, w_bbox[2] - w_bbox[0])
+                if current_line:
                     lines.append(" ".join(current_line))
-                    current_line = [word]
-                    w_bbox = draw.textbbox((0, 0), word, font=font)
-                    widest_line = max(widest_line, w_bbox[2] - w_bbox[0])
-            if current_line:
-                lines.append(" ".join(current_line))
-            return lines, widest_line
+                return lines, widest_line
 
-        def _measure_block_height(lines: list[str], font, font_sz: int) -> tuple[list[int], int]:
-            line_heights = []
-            for ln in lines:
-                bbox = draw.textbbox((0, 0), ln, font=font)
-                line_heights.append((bbox[3] - bbox[1]) + int(font_sz * 0.22))
-            return line_heights, sum(line_heights)
+            def _measure_block_height(lines: list[str], font, font_sz: int) -> tuple[list[int], int]:
+                line_heights = []
+                for ln in lines:
+                    bbox = draw.textbbox((0, 0), ln, font=font)
+                    line_heights.append((bbox[3] - bbox[1]) + int(font_sz * 0.22))
+                return line_heights, sum(line_heights)
 
-        def _wrap_and_draw(clean: str, is_top: bool):
-            if not clean:
-                return
+            def _wrap_and_draw(clean: str, is_top: bool):
+                if not clean:
+                    return
 
-            scale_factor = 0.074 if len(clean) <= 36 else (0.060 if len(clean) <= 70 else 0.050)
-            font_size = max(18, int(h * scale_factor))
-            max_width = int(w * 0.92)
-            # Safe zone: never let top or bottom text block exceed 24% of total image height
-            max_block_h = int(h * 0.24)
-            words = clean.split()
+                scale_factor = 0.074 if len(clean) <= 36 else (0.060 if len(clean) <= 70 else 0.050)
+                font_size = max(18, int(h * scale_factor))
+                max_width = int(w * 0.92)
+                # Safe zone: never let top or bottom text block exceed 24% of total image height
+                max_block_h = int(h * 0.24)
+                words = clean.split()
 
-            font = _get_cached_meme_font(font_size)
-            lines, widest = _wrap_lines(words, font, max_width)
-            line_heights, total_block_h = _measure_block_height(lines, font, font_size)
-
-            # Auto-fit loop: step font size down if too many lines, overflow width, or exceeds vertical safe zone
-            while (len(lines) > 3 or widest > max_width or total_block_h > max_block_h) and font_size > 16:
-                font_size = max(16, int(font_size * 0.88))
                 font = _get_cached_meme_font(font_size)
                 lines, widest = _wrap_lines(words, font, max_width)
                 line_heights, total_block_h = _measure_block_height(lines, font, font_size)
 
-            lines = lines[:3]
-            line_heights, total_block_h = _measure_block_height(lines, font, font_size)
-            margin_y = int(h * 0.032)
-            y_cursor = margin_y if is_top else max(margin_y, h - total_block_h - margin_y)
+                # Auto-fit loop: step font size down if too many lines, overflow width, or exceeds vertical safe zone
+                while (len(lines) > 3 or widest > max_width or total_block_h > max_block_h) and font_size > 16:
+                    font_size = max(16, int(font_size * 0.88))
+                    font = _get_cached_meme_font(font_size)
+                    lines, widest = _wrap_lines(words, font, max_width)
+                    line_heights, total_block_h = _measure_block_height(lines, font, font_size)
 
-            # Sample background luminance under the caption region to boost stroke over bright skies/snow
-            band_top = max(0, y_cursor - 4)
-            band_bot = min(h, y_cursor + total_block_h + 4)
-            mean_lum = 128.0
-            if band_bot > band_top:
-                try:
-                    crop_l = img.crop((0, band_top, w, band_bot)).convert("L")
-                    mean_lum = float(ImageStat.Stat(crop_l).mean[0])
-                except Exception:
-                    mean_lum = 128.0
+                lines = lines[:3]
+                line_heights, total_block_h = _measure_block_height(lines, font, font_size)
+                margin_y = int(h * 0.032)
+                y_cursor = margin_y if is_top else max(margin_y, h - total_block_h - margin_y)
 
-            stroke_mult = 0.115 if mean_lum > 185.0 else 0.095
-            stroke_w = max(3, int(font_size * stroke_mult))
-            shadow_offset = max(2, int(font_size * 0.045))
-            shadow_alpha = 215 if mean_lum > 185.0 else 180
+                # Sample background luminance under the caption region to boost stroke over bright skies/snow
+                band_top = max(0, y_cursor - 4)
+                band_bot = min(h, y_cursor + total_block_h + 4)
+                mean_lum = 128.0
+                if band_bot > band_top:
+                    try:
+                        crop_l = img.crop((0, band_top, w, band_bot)).convert("L")
+                        mean_lum = float(ImageStat.Stat(crop_l).mean[0])
+                    except Exception:
+                        mean_lum = 128.0
 
-            for idx, ln in enumerate(lines):
-                bbox = draw.textbbox((0, 0), ln, font=font)
-                lw = bbox[2] - bbox[0]
-                x_pos = max(8, (w - lw) // 2 - bbox[0])
-                draw.text(
-                    (x_pos + shadow_offset, y_cursor + shadow_offset),
-                    ln,
-                    font=font,
-                    fill=(0, 0, 0, shadow_alpha),
-                    stroke_width=stroke_w,
-                    stroke_fill=(0, 0, 0, shadow_alpha)
-                )
-                draw.text(
-                    (x_pos, y_cursor),
-                    ln,
-                    font=font,
-                    fill=(255, 255, 255, 255),
-                    stroke_width=stroke_w,
-                    stroke_fill=(0, 0, 0, 255)
-                )
-                y_cursor += line_heights[idx]
+                stroke_mult = 0.115 if mean_lum > 185.0 else 0.095
+                stroke_w = max(3, int(font_size * stroke_mult))
+                shadow_offset = max(2, int(font_size * 0.045))
+                shadow_alpha = 215 if mean_lum > 185.0 else 180
 
-        if clean_top:
-            _wrap_and_draw(clean_top, is_top=True)
-        if clean_bottom:
-            _wrap_and_draw(clean_bottom, is_top=False)
+                for idx, ln in enumerate(lines):
+                    bbox = draw.textbbox((0, 0), ln, font=font)
+                    lw = bbox[2] - bbox[0]
+                    x_pos = max(8, (w - lw) // 2 - bbox[0])
+                    draw_y = y_cursor - bbox[1]
+                    draw.text(
+                        (x_pos + shadow_offset, draw_y + shadow_offset),
+                        ln,
+                        font=font,
+                        fill=(0, 0, 0, shadow_alpha),
+                        stroke_width=stroke_w,
+                        stroke_fill=(0, 0, 0, shadow_alpha)
+                    )
+                    draw.text(
+                        (x_pos, draw_y),
+                        ln,
+                        font=font,
+                        fill=(255, 255, 255, 255),
+                        stroke_width=stroke_w,
+                        stroke_fill=(0, 0, 0, 255)
+                    )
+                    y_cursor += line_heights[idx]
 
-        out = BytesIO()
-        img.convert("RGB").save(out, format="PNG", compress_level=6)
-        return out.getvalue()
-    except Exception as e:
-        print(f"[WARN] Meme caption overlay failed: {e}")
-        return image_bytes
+            if clean_top:
+                _wrap_and_draw(clean_top, is_top=True)
+            if clean_bottom:
+                _wrap_and_draw(clean_bottom, is_top=False)
+
+            out = BytesIO()
+            img.convert("RGB").save(out, format="PNG", compress_level=6)
+            return out.getvalue()
+        except Exception as e:
+            print(f"[WARN] Meme caption overlay failed: {e}")
+            return image_bytes

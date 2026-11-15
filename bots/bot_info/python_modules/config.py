@@ -49,14 +49,14 @@ OG_IMAGE_REGEX_2 = re.compile(
 )
 
 # ==============================================================================
-# 2. MEMORY TAGS, HEARSAY FILTERING & IDF RETRIEVAL CONSTANTS
+# 2. MEMORY TAGS, HEARSAY FILTERING, RELATIONSHIP & IDF RETRIEVAL CONSTANTS
 # ==============================================================================
 LEARN_USER_EXTRACT_REGEX = re.compile(
-    r'(?:!LEARN_USER|\[LEARN_USER)\s*[|:]\s*([^\|\n]+)\|\s*([^\]\n]+)\]?',
+    r'(?:!LEARN_USER|\[LEARN_USER)\s*[|:]\s*([^\|\n:—\-]+?)\s*(?:\||:\s+|\s+[\-—]\s+)\s*([^\]\n]+)\]?',
     re.IGNORECASE
 )
 LEARN_USER_STRIP_REGEX = re.compile(
-    r'(?:!LEARN_USER|\[LEARN_USER)\s*[|:]\s*[^\|\n]+\|\s*[^\]\n]*\]?',
+    r'(?:!LEARN_USER|\[LEARN_USER)\s*[|:][^\]\n]*\]?',
     re.IGNORECASE
 )
 LEARN_GENERAL_EXTRACT_REGEX = re.compile(
@@ -64,7 +64,7 @@ LEARN_GENERAL_EXTRACT_REGEX = re.compile(
     re.IGNORECASE
 )
 LEARN_GENERAL_STRIP_REGEX = re.compile(
-    r'(?:!LEARN_GENERAL(?:_FACT|_KNOWLEDGE)?|\[LEARN_GENERAL(?:_FACT|_KNOWLEDGE)?)\s*[|:]\s*[^\]\n]*\]?',
+    r'(?:!LEARN_GENERAL(?:_FACT|_KNOWLEDGE)?|\[LEARN_GENERAL(?:_FACT|_KNOWLEDGE)?)\s*[|:][^\]\n]*\]?',
     re.IGNORECASE
 )
 LEARN_EXTRACT_REGEX = re.compile(
@@ -72,7 +72,7 @@ LEARN_EXTRACT_REGEX = re.compile(
     re.IGNORECASE
 )
 LEARN_STRIP_REGEX = re.compile(
-    r'(?:!LEARN(?:_SERVER|_LORE|_FACT)?|\[LEARN(?:_SERVER|_LORE|_FACT)?)(?!_USER|_GENERAL)\s*[|:]\s*[^\]\n]*\]?',
+    r'(?:!LEARN(?:_SERVER|_LORE|_FACT)?|\[LEARN(?:_SERVER|_LORE|_FACT)?)(?!_USER|_GENERAL)\s*[|:][^\]\n]*\]?',
     re.IGNORECASE
 )
 
@@ -83,7 +83,7 @@ THIRD_PARTY_REPORT_REGEX = re.compile(
     r'(?:they|them|he|him|she|her|someone|somebody|people|everyone|bro|dude|guy|girl|chat|'
     r'my\s+(?:friend|friends|coworker|boss|brother|sister|mom|dad|ex|roommate|partner|wife|husband|bf|gf|cousin|uncle|aunt)|'
     r'a\s+(?:friend|guy|girl|person|user)|@[a-zA-Z0-9_\-\.]+)\s+'
-    r'(?:said|says|say|told\s+(?:me|us|him|her|them)|claimed|claims|mentioned|thinks|thought|asked|wrote|posted|kept\s+saying|was\s+saying|were\s+saying)'
+    r'(?:said|says|say|told\s+(?:me|us|him|her|them)|claimed|claims|mentioned|thinks|thought|asked|wrote|posted|kept\s+saying|were\s+saying|was\s+saying)'
     r'|according\s+to\s+(?:them|him|her|someone|@[a-zA-Z0-9_\-\.]+)'
     r'|quoting\s+(?:them|him|her|someone)'
     r')\b',
@@ -95,7 +95,132 @@ FACT_HEARSAY_PREFIX_REGEX = re.compile(
     re.IGNORECASE
 )
 FIRST_PERSON_SELF_REF_REGEX = re.compile(
-    r"\b(?:i|i'm|im|i've|ive|i'd|id|i'll|my|me|myself|mine)\b",
+    r"\b(?:i|i['’]m|im|i['’]ve|ive|i['’]d|id|i['’]ll|my|me|myself|mine)\b",
+    re.IGNORECASE
+)
+
+# Detects when a user states or corrects a personal/identity fact, preference, project, or notable situation
+PERSONAL_FACT_STATEMENT_REGEX = re.compile(
+    r"\b(?:"
+    r"(?:i\s+am|i['’]m|im)\s+(?:a\s+|an\s+)?(?:man|guy|dude|boy|male|woman|girl|lady|gal|female|non[\s\-]?binary|enby|"
+    r"\d{2}\s+years?\s+old|married|single|engaged|studying|majoring\s+in|working\s+(?:on|as|at)|building|making|learning|playing|grinding|maining|a\s+student|a\s+developer|an?\s+engineer)"
+    r"|(?:i\s+am|i['’]m|im)\s+not\s+a\s+(?:woman|girl|lady|man|guy|dude|boy)"
+    r"|my\s+(?:pronouns?|name|real\s+name|age|wife|husband|spouse|partner|job|major|degree|birthday|favorite|main|cat|dog|pet|pc|gpu|cpu|car|game|project)\b"
+    r"|i\s+(?:go\s+by|use)\s+(?:he/him|she/her|they/them)"
+    r"|i\s+(?:really\s+)?(?:love|like|hate|dislike|prefer|main|play|built|bought|got|started|finished|moved\s+to|work\s+at|study)\b"
+    r"|(?:please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+)?(?:not|never|stop|don['’]?t|dont)\s+(?:call\s+me|calling\s+me|refer\s+to\s+me\s+as|call\s+us)\b"
+    r"|(?:please\s+)?call\s+me\s+[a-z0-9_\-]{2,}"
+    r"|(?:remember\s+that|don['’]?t\s+forget|dont\s+forget|keep\s+in\s+mind|note\s+that|for\s+the\s+record)\b"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Identifies core personal identity facts (gender, pronouns, name, age, spouse) that should always
+# be visible to the bot for the Current Speaker so the bot never misgenders or forgets who they are
+CORE_IDENTITY_FACT_REGEX = re.compile(
+    r"\b(?:"
+    r"male|female|man|woman|guy|girl|gentleman|lady|non[\s\-]?binary|enby|gender|pronouns?|"
+    r"he/him|she/her|they/them|his/him|her/hers|"
+    r"years?\s+old|age\s+is|born\s+in|"
+    r"name\s+is|goes\s+by|called|call\s+them|called\s+sweetie|being\s+called|prefers?\s+not\s+to\s+be\s+called|dislikes?\s+being\s+called|boundary|"
+    r"married|wife|husband|spouse|fianc[eé]e?"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Situational Awareness Classification Regexes (distinguishes venting about a game/bug from hostility toward the bot)
+SITUATIONAL_VENTING_REGEX = re.compile(
+    r"\b(?:"
+    r"crashed|crashing|froze|freezing|lagging|lagged|bugged|glitched|broke|broken|"
+    r"wiped|died|killed\s+me|one[\s\-]?shot|lost\s+my|corrupted|blue[\s\-]?screen|bsod|"
+    r"tilted|frustrat\w+|annoying\s+(?:bug|boss|level|game|error|update|match|team)|"
+    r"(?:this|that|the|my)\s+(?:game|boss|code|compiler|pc|gpu|driver|server|update|match|quest|raid)\s+is\s+(?:trash|garbage|stupid|dumb|broken|awful|cooked|scuffed)"
+    r")\b",
+    re.IGNORECASE
+)
+
+SITUATIONAL_CELEBRATION_REGEX = re.compile(
+    r"\b(?:"
+    r"finally\s+(?:beat|finished|fixed|got|passed|built|solved)|"
+    r"let['’]?s\s+go+|lesgo+|we\s+won|i\s+won|got\s+an?\s+a\b|\b99%|\b100%|"
+    r"level(?:ed)?\s+up|new\s+pb|personal\s+best|unlocked|upgraded|promoted|clutch|nailed\s+it"
+    r")\b",
+    re.IGNORECASE
+)
+
+SITUATIONAL_HELP_SEEKING_REGEX = re.compile(
+    r"\b(?:"
+    r"how\s+do\s+(?:i|you|we)|anyone\s+know\s+how|can\s+(?:you|someone)\s+(?:help|explain)|"
+    r"what\s+(?:is\s+the\s+best|should\s+i)|why\s+(?:is\s+my|does\s+my)|"
+    r"any\s+(?:tips|advice|recommendations)|stuck\s+on|need\s+help"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Universal Relational & Social Signal Regexes (Persona-Agnostic for Any Bot or User)
+SITUATIONAL_SHARED_BOND_REGEX = re.compile(
+    r"\b(?:"
+    r"you['’]?re\s+(?:so\s+|totally\s+|completely\s+|dead\s+)?right|i\s+agree(?:\s+with\s+you)?|"
+    r"good\s+point|fair\s+point|great\s+point|exactly\s+what\s+i|on\s+your\s+side|team\s+\w+|"
+    r"backed\s+(?:me|you)\s+up|got\s+your\s+back|w\s+bot|goat\w*|real\s+one|my\s+goat|"
+    r"we\s+both|same\s+here|twinning|glad\s+you['’]?re\s+here"
+    r")\b",
+    re.IGNORECASE
+)
+
+AFFECTION_GIFT_OR_CARE_REGEX = re.compile(
+    r"\b(?:"
+    r"headpats?|pats?\s+head|scritches|chin\s+scratch\w*|ear\s+scratch\w*|belly\s+rub\w*|"
+    r"treats?|snacks?|gift|present|coffee|tea|espresso|latte|boba|cookie\w*|cake|pizza|tacos?|"
+    r"salmon|tuna|sashimi|catnip|churu|hugs?|cuddles?|snuggles?|high[\s\-]?five|cheers\b|"
+    r"for\s+you|brought\s+you|made\s+you|proud\s+of\s+you"
+    r")\b",
+    re.IGNORECASE
+)
+
+PLAYFUL_BANTER_OR_RIVALRY_REGEX = re.compile(
+    r"\b(?:"
+    r"skill\s+issue|ratio\b|outclassed|amateur|dork|nerd|goober|gremlin|tsundere|"
+    r"drama\s+queen|salty|ragebait\w*|bet\s+you\s+can['’]?t|nice\s+try|weak\s+roast|"
+    r"is\s+that\s+all\s+you['’]?ve\s+got|fight\s+me|1v1\b|overrated|mid\b"
+    r")\b",
+    re.IGNORECASE
+)
+
+RELATIONSHIP_QUERY_REGEX = re.compile(
+    r"\b(?:"
+    r"what\s+do\s+you\s+think\s+(?:of|about)|how\s+do\s+you\s+feel\s+about|"
+    r"do\s+you\s+(?:like|love|hate|trust|know|get\s+along\s+with)|who\s+is\s+your\s+(?:favorite|best\s+friend|rival)|"
+    r"are\s+you\s+(?:friends|close|rivals|cool)\s+with|your\s+(?:opinion|thoughts)\s+on|"
+    r"relationship\s+with|who\s+do\s+you\s+like\s+(?:more|best)"
+    r")\b",
+    re.IGNORECASE
+)
+
+THIRD_PARTY_DEFENSE_OR_PRAISE_REGEX = re.compile(
+    r"\b(?:"
+    r"be\s+nice\s+to|leave\s+.{1,25}\s+alone|don['’]?t\s+be\s+(?:mean|rude)\s+to|"
+    r"apologize\s+to|stop\s+(?:bullying|picking\s+on|being\s+mean\s+to)|"
+    r"i\s+(?:love|like|adore|respect|appreciate)\s+"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Phase 1: Reunion, Episodic Session Chapters, Social Graph & Server-Join Welcome Constants
+REUNION_ABSENCE_SECONDS = 172800.0  # 48 hours of absence triggers a Warm Reunion note for liked regulars
+EPISODIC_MIN_SESSION_MSGS = 6       # Minimum non-system messages in a completed session to archive an Episodic Chapter
+MAX_EPISODIC_CHAPTERS = 12          # Maximum rolling episodic session chapters stored per channel
+
+SOCIAL_GRAPH_COMMAND_REGEX = re.compile(
+    r'!(?:relationships|socialgraph|bonds|standing)\b',
+    re.IGNORECASE
+)
+CHAPTERS_COMMAND_REGEX = re.compile(
+    r'!(?:chapters|episodes|recap|storysofar)\b',
+    re.IGNORECASE
+)
+WELCOME_ADMIN_COMMAND_REGEX = re.compile(
+    r'admin\s+welcome\s+(on|off|status|test)\b',
     re.IGNORECASE
 )
 
@@ -166,7 +291,7 @@ ERROR_REPLY_CAPTURE_REGEX = re.compile(
 )
 
 # Bracket emote conversion & Asterisk emote extraction (for anti-repetition tracking)
-BRACKET_EMOTE_REGEX = re.compile(r'\[([a-zA-Z][a-zA-Z0-9\s,\'\-\.~!]{1,45})\](?![\(\:])')
+BRACKET_EMOTE_REGEX = re.compile(r'\[([a-zA-Z][a-zA-Z0-9\s,\'’\-\.~!]{1,45})\](?![\(\:])')
 BARE_FILLER_UTTERANCE_REGEX = re.compile(
     r'^[\s\W]*(?:'
     r'erm+|um+|uh+|uh+[\s\-]+huh+|hmm+|hm+|ah+|oh+|eh+|meh|huh|wat|wut|'
@@ -206,19 +331,21 @@ EXPLICIT_IMAGE_REQ_REGEX = re.compile(
     re.IGNORECASE
 )
 USER_SUBJECT_EXTRACT_REGEX = re.compile(
-    r'(?:(?:generate|draw|render|make|create|show|give|send|paint|sketch|conjure|summon)'
+    r'(?:'
+    r'(?:generate|draw|render|make|create|show|give|send|paint|sketch|conjure|summon)'
     r'(?:\s+(?:me|us))?(?:\s+(?:a|an|and|the|another))?\s+'
-    r'(?:image|pic|picture|art|photo|render|drawing|painting|portrait|illustration|meme)\s+(?:of|about|for|showing|with)\s+)'
-    r'(.+)$',
+    r'(?:image|pic|picture|art|photo|render|drawing|painting|portrait|illustration|meme)\s+(?:of|about|for|showing|with)\s+'
+    r'|(?:draw|paint|sketch)\s+(?:me\s+|us\s+)?(?:a\s+|an\s+|some\s+|the\s+)?(?!(?:image|pic|picture|art|photo|render|drawing|painting|portrait|illustration|meme)\b)'
+    r')(.+)$',
     re.IGNORECASE | re.DOTALL
 )
 BOT_IMAGE_PROMISE_REGEX = re.compile(
     r'\b(?:'
-    r'i\'ll\s+(?:generate|draw|sketch|paint|render|fix\s+that)|'
+    r'i[\'’]ll\s+(?:generate|draw|sketch|paint|render|fix\s+that)|'
     r'i\s+(?:generated|drew|sketched|painted|rendered)|'
     r'one\s+(?:fresh\s+|new\s+)?(?:rendering|portrait|drawing|sketch|picture|image|scene)\s+of|'
-    r'here(?:\x27s|\u2019s|\s+is)\s+(?:the|a|an|your)\s+(?:[a-z0-9_\-]+\s+){0,4}?(?:image|pic|picture|render|drawing|portrait|meme|sky|sketch|photo|scene|view|version|path|build|plate|order|fix|take|tribute|masterpiece)|'
-    r'here(?:\x27s|\u2019s|\s+is)\s+your\s+(?:true|new|fixed|updated|proper|fresh|actual|real)\s+[a-z0-9_\-]+|'
+    r'here(?:[\'’]s|\s+is)\s+(?:the|a|an|your)\s+(?:[a-z0-9_\-]+\s+){0,4}?(?:image|pic|picture|render|drawing|portrait|meme|sky|sketch|photo|scene|view|version|path|build|plate|order|fix|take|tribute|masterpiece)|'
+    r'here(?:[\'’]s|\s+is)\s+your\s+(?:true|new|fixed|updated|proper|fresh|actual|real)\s+[a-z0-9_\-]+|'
     r'let\s+me\s+fix\s+that(?:\s+for\s+you|\s+with\s+a|\s+right\s+up)?|'
     r'fixed\s+that\s+for\s+you|'
     r'rebalanced\s+and\s+(?:purr[\-\s]?fected|perfected)|'
@@ -230,8 +357,8 @@ BOT_IMAGE_PROMISE_REGEX = re.compile(
     r'freshly\s+plated|'
     r'loading\s+screen\s+i\s+generated|'
     r'pull\s+it\s+out\s+of\s+the\s+aether|'
-    r'give\s+you\s+one\s+that\'s\s+technically\s+accurate|'
-    r'let\'s\s+see\s+what\s+we\'re\s+working\s+with|'
+    r'give\s+you\s+one\s+that[\'’]s\s+technically\s+accurate|'
+    r'let[\'’]s\s+see\s+what\s+we[\'’]re\s+working\s+with|'
     r'behold[—\-\s!]|'
     r'points\s+at\s+|'
     r'hologram\s+flickers\s+to\s+life|'
@@ -257,7 +384,7 @@ TOPIC_INTEREST_CUES_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Stock/cliche or placeholder meme punchlines that bots must NEVER render or repeat across turns
+# Generic placeholder meme punchlines that bots must NEVER render or repeat across turns
 OVERUSED_MEME_CAPTIONS = frozenset({
     "absolutely unacceptable",
     "bottom text",
@@ -269,11 +396,11 @@ OVERUSED_MEME_CAPTIONS = frozenset({
     "bottom punchline",
     "insert top text",
     "insert bottom text",
-    "when a peasant compares you to that pink catchphrase disaster",
-    "when someone offers you a green apple after your daily limit"
+    "witty setup line",
+    "witty punchline"
 })
 
-# Dynamic human-like spontaneity micro-impulses (injected lightly to keep bots organic, unpredictable & lifelike)
+# Dynamic human-like spontaneity & relational micro-impulses (injected lightly to keep bots organic, unpredictable & lifelike)
 SPONTANEOUS_MICRO_MOMENTS = (
     "React like a real person hanging out in Discord: jump straight into your point or reaction without a formulaic opening.",
     "Notice a specific, quirky detail in what was just said or shown and riff on that exact detail instead of giving a generic summary.",
@@ -281,7 +408,8 @@ SPONTANEOUS_MICRO_MOMENTS = (
     "If the moment calls for it, playfully challenge, tease, or ask a sharp follow-up question back to the speaker like a real friend/rival in chat.",
     "Vary your rhythm: you don't need a three-part monologue every turn; a sharp, natural 1-2 sentence remark or spontaneous visual observation feels much more alive.",
     "If a joke or bit has already been done in the last 2 messages, pivot to a fresh angle or new observation instead of repeating the same gag.",
-    "Express a genuine, in-the-moment mood shift (amused, skeptical, intrigued, unimpressed, or hyped) based on the exact topic being discussed."
+    "Express a genuine, in-the-moment mood shift (amused, skeptical, intrigued, unimpressed, or hyped) based on the exact topic being discussed.",
+    "Let your evolved relationship history with the speaker (or with other bots in the room) color how warmly, competitively, or loyally you respond."
 )
 
 # Kaomoji/Emoticons to strip from TTS
@@ -337,6 +465,17 @@ MIMO_AUDIO_TAG_MAP = {
     "whispers": "softly",
     "mutters": "softly",
     "mumbles": "softly",
+    "purr": "sigh",
+    "purrs": "sigh",
+    "purring": "sigh",
+    "hiss": "sneer",
+    "hisses": "sneer",
+    "chirp": "chuckle",
+    "chirps": "chuckle",
+    "trill": "chuckle",
+    "trills": "chuckle",
+    "mew": "softly",
+    "meow": "smile",
 }
 
 STOPWORDS = frozenset({

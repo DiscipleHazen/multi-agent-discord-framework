@@ -25,6 +25,7 @@ _CIRCUIT_COOLDOWN_SECONDS = 45.0
 
 RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 520, 522, 524})
 SOCKET_RESET_STATUSES = frozenset({502, 503, 504, 520, 522, 524})
+_CHANNEL_KEYED_SUBDICTS = frozenset({"_active_followup_bot", "_last_unprompted_chime", "_last_bot_to_bot_turn"})
 
 
 def sanitize_url(url: str) -> str:
@@ -57,7 +58,7 @@ def get_http_session(reset: bool = False) -> requests.Session:
         session.headers.update({
             "Connection": "keep-alive",
             "Accept-Encoding": "gzip, deflate",
-            "User-Agent": "DiscordMultiAgentFramework/3.0"
+            "User-Agent": "DiscordMultiAgentFramework/3.1"
         })
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=30,
@@ -72,7 +73,11 @@ def get_http_session(reset: bool = False) -> requests.Session:
 
 
 def is_model_circuit_open(model_key: str) -> bool:
-    """Returns True if `model_key` is currently in a fast-fail circuit-breaker cooldown window."""
+    """
+    Returns True if `model_key` is currently in a fast-fail circuit-breaker cooldown window.
+    Automatically transitions expired circuits into a half-open probe state (`failures = threshold - 1`)
+    so a single post-cooldown failure re-opens the circuit while a single success clears it.
+    """
     if not model_key:
         return False
     now_m = time.monotonic()
@@ -80,8 +85,12 @@ def is_model_circuit_open(model_key: str) -> bool:
         st = _MODEL_CIRCUIT_STATE.get(model_key)
         if not st:
             return False
-        if now_m < st.get("open_until", 0.0):
+        open_until = st.get("open_until", 0.0)
+        if now_m < open_until:
             return True
+        if open_until > 0.0:
+            st["open_until"] = 0.0
+            st["failures"] = max(0, _CIRCUIT_FAILURE_THRESHOLD - 1)
         return False
 
 
@@ -359,10 +368,25 @@ def _get_file_signature(abs_path: str) -> tuple[int, int] | None:
 
 
 def _normalize_top_dict_keys(data):
-    """Normalizes top-level numeric string keys to int so RAM cache and disk reads match 100%."""
-    if isinstance(data, dict):
-        return {(int(k) if isinstance(k, str) and k.isdigit() else k): v for k, v in data.items()}
-    return data
+    """
+    Normalizes top-level numeric string keys (and channel-ID keys inside known
+    shared coordination sub-dicts) to `int` so RAM cache and disk reads match 100%
+    without duplicate str/int key collisions.
+    """
+    if not isinstance(data, dict):
+        return data
+    out = {}
+    for k, v in data.items():
+        norm_k = int(k) if isinstance(k, str) and k.isdigit() else k
+        if norm_k in _CHANNEL_KEYED_SUBDICTS and isinstance(v, dict):
+            norm_sub = {}
+            for sk, sv in v.items():
+                norm_sk = int(sk) if isinstance(sk, str) and sk.isdigit() else sk
+                norm_sub[norm_sk] = sv
+            out[norm_k] = norm_sub
+        else:
+            out[norm_k] = v
+    return out
 
 
 def _store_in_mem_cache(abs_path: str, sig: tuple[int, int], data, serialized_str: str | None = None):
@@ -416,8 +440,8 @@ def _read_json_unlocked(abs_path: str, default_val, retries: int = 5, return_ser
 
 def _write_json_unlocked(abs_path: str, data, retries: int = 5, pre_serialized: str | None = None) -> bool:
     """
-    Serializes JSON once in memory and atomically writes via a unique temp file,
-    updating the nanosecond RAM cache with normalized keys.
+    Serializes JSON once in memory, writes a single unique temp file, and atomically
+    swaps it into `abs_path` via `os.replace`, updating the nanosecond RAM cache.
     """
     normalized_for_cache = _normalize_top_dict_keys(data) if isinstance(data, dict) else data
     if pre_serialized is not None:
@@ -430,25 +454,30 @@ def _write_json_unlocked(abs_path: str, data, retries: int = 5, pre_serialized: 
 
     pid = os.getpid()
     tid = threading.get_ident()
+    tmp_file = f"{abs_path}.{pid}.{tid}.{random.randint(1000, 9999)}.tmp"
 
-    for attempt in range(retries):
-        tmp_file = f"{abs_path}.{pid}.{tid}.{random.randint(1000, 9999)}.tmp"
-        try:
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                f.write(serialized)
-                f.flush()
-            os.replace(tmp_file, abs_path)
-            sig = _get_file_signature(abs_path)
-            if sig is not None:
-                _store_in_mem_cache(abs_path, sig, normalized_for_cache, serialized)
-            return True
-        except Exception:
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+
+        for attempt in range(retries):
             try:
-                if os.path.exists(tmp_file):
-                    os.remove(tmp_file)
+                os.replace(tmp_file, abs_path)
+                sig = _get_file_signature(abs_path)
+                if sig is not None:
+                    _store_in_mem_cache(abs_path, sig, normalized_for_cache, serialized)
+                return True
             except Exception:
-                pass
-            time.sleep(0.008 * (attempt + 1) + random.uniform(0.002, 0.012))
+                time.sleep(0.008 * (attempt + 1) + random.uniform(0.002, 0.012))
+    except Exception:
+        pass
+    finally:
+        try:
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
+        except Exception:
+            pass
     return False
 
 
@@ -523,6 +552,11 @@ async def async_load_json_file(file_name: str, default_val, retries: int = 5):
                 return copy.deepcopy(cached[2])
 
     return await asyncio.to_thread(load_json_file, file_name, default_val, retries)
+
+
+async def async_save_json_file(data, file_name: str, retries: int = 5):
+    """Offloads atomic JSON file saving to a worker thread."""
+    await asyncio.to_thread(save_json_file, data, file_name, retries)
 
 
 async def async_update_json_file(file_name: str, default_val, mutator_fn):

@@ -23,7 +23,7 @@ from config import (
     LEARN_USER_EXTRACT_REGEX, LEARN_GENERAL_EXTRACT_REGEX, LEARN_EXTRACT_REGEX,
     FALLBACK_IMAGE_NOTE_REGEX, FALLBACK_VISION_MODELS, FALLBACK_TEXT_MODELS,
     TOPIC_CHANGE_REQUEST_REGEX, BARE_FILLER_UTTERANCE_REGEX,
-    INTENTIONAL_NO_RESPONSE_REGEX
+    INTENTIONAL_NO_RESPONSE_REGEX, PERSONAL_FACT_STATEMENT_REGEX
 )
 
 from core_system import load_json_file, update_json_file, post_with_backoff, sanitize_url, is_model_circuit_open
@@ -40,7 +40,11 @@ from memory_and_context import (
     verify_and_resolve_user_facts, is_duplicate_fact, find_canonical_username,
     route_server_vs_general_facts, build_temporal_context_block,
     build_active_user_context_block, select_relevant_memories,
-    is_ephemeral_or_banter_fact, consolidate_and_append_fact
+    is_ephemeral_or_banter_fact, consolidate_and_append_fact,
+    extract_implicit_user_facts_from_message, get_user_affinity_score,
+    _extract_base_username, _extract_saved_rapport_state_full,
+    _get_disposition_tier_label, _derive_relationship_archetype,
+    RAPPORT_ENTRY_REGEX
 )
 from ai_services import (
     summarize_image_for_memory, auto_react, ensure_unique_image_prompt,
@@ -50,8 +54,10 @@ from ai_services import (
 from bot_discovery import (
     register_active_bot, get_other_active_bots, is_command_directed_at_other_bot,
     detect_addressed_bot_name, resolve_contextual_followup,
-    compute_spontaneous_interest_multiplier, is_other_bot_in_active_exchange
+    compute_spontaneous_interest_multiplier, is_other_bot_in_active_exchange,
+    is_directly_addressed_by_fellow_bot, _term_boundary_pattern
 )
+from commands_and_embeds import handle_bot_commands
 
 # ==============================================================================
 # IN-FILE HELPER FUNCTIONS
@@ -91,15 +97,20 @@ def build_glitch_awareness_rules(bot_name: str) -> str:
 def build_memory_attribution_rules(bot_name: str, other_bot_names: list[str] = None) -> str:
     other_bots_str = ", ".join(other_bot_names) if other_bot_names else "other bots in the server"
     return (
-        "\n\n### CRITICAL IDENTITY, TARGETING & MEMORY CLASSIFICATION RULES:\n"
-        f"1. **BOT IDENTITY & MULTI-BOT CHAT AWARENESS**: You are **{bot_name}**. You share this channel with other bots ({other_bots_str}). "
-        f"When a message in history says `[Username (speaking to OtherBot, NOT to {bot_name})]: ...`, that user was talking to `OtherBot`, NOT you! "
-        f"Do NOT assume users are calling you by another bot's name (e.g., if a user asked 'chud are you X?' earlier and now says '{bot_name}?', they are simply turning to ask you now—do NOT say 'I don't answer to Chud').\n"
-        "2. **NEVER SHOEHORN SAVED MEMORIES OR BIO EXAMPLES OUT OF CONTEXT (CRITICAL)**: Any saved facts shown in your prompt are strictly passive background reference. NEVER bring up a saved fact, past meme, or example quote from your bio out of nowhere, and NEVER pretend an older saved topic is currently happening! Respond 100% to what the speaker JUST said right now.\n"
-        "3. **USER FACTS (`[LEARN_USER: username | fact]`)**: ONLY output `[LEARN_USER: username | fact]` when `username` explicitly states a permanent real-life fact about THEMSELVES (job, degree, family, hardware, enduring hobby). NEVER save temporary chat banter, memes, or questions.\n"
-        "4. **SERVER LORE vs. SHARED GENERAL FACTS (RARE & PERMANENT ONLY)**:\n"
-        "   - Use `[LEARN: fact]` ONLY for permanent **Discord Server Lore** (permanent server rules or major milestones—NEVER save what people are currently joking or memeing about in chat!).\n"
-        "   - Use `[LEARN_GENERAL: fact]` ONLY for enduring **Shared General Knowledge** (real-world science, history, or tech facts)."
+        "\n\n### CRITICAL IDENTITY, SITUATIONAL RADAR, RELATIONSHIP DYNAMICS & MEMORY RULES:\n"
+        f"1. **STRICT PERSONA & SPEECH-STYLE ISOLATION (YOU ARE {bot_name.upper()}, NEVER ANOTHER BOT)**: You are **{bot_name}**, and ONLY **{bot_name}**. "
+        f"You share this channel with other bots ({other_bots_str}), which are completely separate characters with their own species, roles, and speech rules. "
+        f"NEVER confuse yourself with another bot, NEVER mimic another bot's speech restrictions or vocalizations, and when history says `[Username (speaking to OtherBot, NOT to {bot_name})]: ...`, remember they were addressing `OtherBot`, NOT you!\n"
+        "2. **SITUATIONAL & SOCIAL GRAPH AWARENESS (USERS & FELLOW BOTS)**:\n"
+        "   - Check `### Live Situational Awareness, Room Social Graph & Dossier` on every turn. Pay attention to the **Immediate Situation** (never mistake external venting about a game crash/bug for an insult toward you!), your **Relationship Archetype** with the speaker (whether Human Regular or Fellow Server Bot), **Room Relationship Contrast** (treat your Trusted Inner Circle favorites and Bonded Companions noticeably warmer than newcomers or rivals in the same room), **PROTECTIVE LOYALTY TRIGGERS** (defend friends/companions you are fond of when someone is rude to them!), and **SHARED BOND / RIVALRY TRIGGERS**.\n"
+        "3. **PROACTIVE LEARNING, NICKNAME BOUNDARIES & DISPOSITION CATALYSTS (`[LEARN_USER: name | fact]`)**:\n"
+        "   - Output `[LEARN_USER: name | specific 8-20 word objective fact]` whenever a human user OR a fellow bot reveals a meaningful detail, identity trait (gender/pronouns, name, age, family), personal boundary (e.g. 'don\'t call me sweetie', preferred nicknames), preference/favorite, game/project they are playing or building, or notable interaction.\n"
+        "   - CRITICAL: Writing 'note to self: ...' in normal chat text does NOT save to memory! You MUST include the literal `[LEARN_USER: name | fact]` or `[LEARN: server event]` bracket tag at the very end of your message whenever you want to remember something.\n"
+        "   - When an interaction with a user or fellow bot genuinely warms you up, earns your respect, or annoys you, log the catalyst via `[LEARN_USER: name | Disposition: concise reason why your attitude shifted]`.\n"
+        "4. **NOTABLE SERVER SITUATIONS & GENERAL KNOWLEDGE (1 TO 2 TAGS MAX PER TURN)**:\n"
+        "   - Use `[LEARN: specific 10-22 word summary]` to record notable server situations, funny group events, ongoing gaming/project sessions, or evolving relationships/alliances/rivalries between server members and bots.\n"
+        "   - Use `[LEARN_GENERAL: fact]` for interesting universal trivia, gaming mechanics, science, or real-world facts.\n"
+        "   - **BALANCE RULE**: Log rich, specific details when something new or notable happens, never shoehorn unrelated saved facts out of context, and attach at most 1–2 learning tags per turn."
     )
 
 
@@ -238,11 +249,13 @@ def run_bot(
                         chat_memory = load_json_file(chat_memory_file, {})
                         hist = chat_memory.get(ch_id_int, [])
 
+                        other_bots_loop_meta = get_other_active_bots(shared_image_cache_file, client.user.id)
+                        other_bots_loop_names = [ob.get("display_name") for ob in other_bots_loop_meta if ob.get("display_name")]
                         dynamic_system = copy.deepcopy(system_prompt)
                         now_str = datetime.now().strftime("%A, %I:%M %p")
                         dynamic_system["content"] += build_temporal_context_block(hist[-context_window:], now_str)
                         dynamic_system["content"] += build_glitch_awareness_rules(client.user.display_name)
-                        dynamic_system["content"] += build_memory_attribution_rules(client.user.display_name)
+                        dynamic_system["content"] += build_memory_attribution_rules(client.user.display_name, other_bots_loop_names)
 
                         recent_Loop_text = " ".join(
                             m.get("content", "") for m in hist[-4:]
@@ -259,6 +272,20 @@ def run_bot(
                         )
                         if general_memory:
                             dynamic_system["content"] += "\n### Relevant General Knowledge (Passive Reference Only):\n" + "\n".join(f"- {f}" for f in general_memory)
+
+                        uprof_loop = load_json_file(user_profiles_file, {})
+                        active_loop_block = build_active_user_context_block(
+                            user_profiles=uprof_loop,
+                            raw_history=hist[-context_window:],
+                            current_speaker=None,
+                            combined_recent_prompt=recent_Loop_text,
+                            is_spontaneous=True,
+                            persona_prompt=system_prompt.get("content", ""),
+                            other_bot_names=other_bots_loop_names,
+                            my_bot_name=client.user.display_name
+                        )
+                        if active_loop_block:
+                            dynamic_system["content"] += active_loop_block
 
                         api_messages = build_api_messages_from_history(
                             dynamic_system, hist[-context_window:], client.user.id, client.user.display_name
@@ -410,272 +437,32 @@ def run_bot(
         content_lower = (message.content or "").lower()
 
         # ======================================================================
-        # COMMAND SUITE
+        # COMMAND SUITE (Delegated to commands_and_embeds.py)
         # ======================================================================
-        if client.user.mentioned_in(message):
-            if "!help" in content_lower or "admin help" in content_lower:
-                help_msg = (
-                    f"🛠️ **{client.user.display_name} Command Reference**\n"
-                    "**User Commands:**\n"
-                    f"• `@{client.user.display_name} !whoami` — See what facts I remember about you.\n"
-                    f"• `@{client.user.display_name} !forgetme <keyword|all>` — Delete a wrongly saved fact (or `all`) from your own profile.\n"
-                    f"• `@{client.user.display_name} !help` — Show this command guide.\n"
-                    "**Admin Channel Controls:**\n"
-                    f"• `@{client.user.display_name} admin status` — View current channel config & memory stats.\n"
-                    f"• `@{client.user.display_name} admin enable` / `admin disable` — Toggle me on/off in this channel.\n"
-                    f"• `@{client.user.display_name} admin reactonly on` / `off` — Toggle silent emoji-reaction-only mode.\n"
-                    f"• `@{client.user.display_name} admin chances <resp 0.0-1.0> <emoji 0.0-1.0>` — Set random chime-in & reaction probabilities.\n"
-                    f"• `@{client.user.display_name} admin random <minutes>` — Set periodic unprompted post timer (`0` = off).\n"
-                    f"• `@{client.user.display_name} admin features <vision|gifs|image|voice> <on|off>` — Toggle media capabilities in this channel.\n"
-                    f"• `@{client.user.display_name} admin temp <0.1-1.5>` — Adjust creativity temperature in this channel.\n"
-                    "**Admin Memory Management:**\n"
-                    f"• `@{client.user.display_name} admin memory` — Inspect learned server lore, general facts & user profiles.\n"
-                    f"• `@{client.user.display_name} admin learn <fact>` — Manually add a server lore fact.\n"
-                    f"• `@{client.user.display_name} admin learngeneral <fact>` — Manually add a shared general knowledge fact.\n"
-                    f"• `@{client.user.display_name} admin learnuser <username> | <fact>` — Manually add a fact to a user's profile.\n"
-                    f"• `@{client.user.display_name} admin forget <keyword>` — Delete any saved memory matching `<keyword>`.\n"
-                    f"• `@{client.user.display_name} !clearmemory` — Wipe short-term conversation history in this channel."
-                )
-                await message.channel.send(help_msg)
-                return
-
-            if "!whoami" in content_lower:
-                uprof = load_json_file(user_profiles_file, {})
-                canon = find_canonical_username(message.author.display_name, uprof, {message.author.display_name})
-                facts = uprof.get(canon, [])
-                if facts:
-                    facts_str = "\n".join(f"• {f}" for f in facts)
-                    await message.channel.send(f"🗂️ **What {client.user.display_name} knows about {message.author.display_name}:**\n{facts_str}")
-                else:
-                    await message.channel.send(f"🗂️ I don't have any permanent dossier notes on **{message.author.display_name}** yet.")
-                return
-
-            if "!forgetme" in content_lower:
-                target_kw = message.content.lower().split("!forgetme", 1)[1].strip()
-                if not target_kw:
-                    await message.channel.send(f"💡 Usage: `@{client.user.display_name} !forgetme <word from that fact>`")
-                    return
-
-                removed_list = []
-
-                def _forget_self(uprof_dict):
-                    canon = find_canonical_username(message.author.display_name, uprof_dict, {message.author.display_name})
-                    existing = uprof_dict.get(canon, [])
-                    if not isinstance(existing, list) or not existing:
-                        return uprof_dict
-                    if target_kw == "all":
-                        removed_list.extend(existing)
-                        uprof_dict[canon] = []
-                    else:
-                        kept = []
-                        for f in existing:
-                            if target_kw in f.lower():
-                                removed_list.append(f)
-                            else:
-                                kept.append(f)
-                        uprof_dict[canon] = kept
-                    return uprof_dict
-
-                update_json_file(user_profiles_file, {}, _forget_self)
-                if removed_list:
-                    removed_preview = "; ".join(f"`{r}`" for r in removed_list[:5])
-                    await message.channel.send(f"🗑️ Removed **{len(removed_list)}** fact(s) from **{message.author.display_name}**'s profile: {removed_preview}")
-                else:
-                    await message.channel.send(f"🔍 No saved facts in **{message.author.display_name}**'s profile matched `{target_kw}`.")
-                return
-
-        if client.user.mentioned_in(message) and is_admin:
-            if "admin enable" in content_lower:
-                def _enable(c):
-                    c.setdefault(channel_id, {})["enabled"] = True
-                    return c
-                update_json_file(channel_config_file, {}, _enable)
-                await message.channel.send(f"✅ **{client.user.display_name}** enabled in this channel.")
-                return
-            elif "admin disable" in content_lower:
-                def _disable(c):
-                    c.setdefault(channel_id, {})["enabled"] = False
-                    return c
-                update_json_file(channel_config_file, {}, _disable)
-                await message.channel.send(f"🚫 **{client.user.display_name}** disabled in this channel.")
-                return
-            elif "admin reactonly on" in content_lower:
-                def _react_on(c):
-                    c.setdefault(channel_id, {})["react_only"] = True
-                    return c
-                update_json_file(channel_config_file, {}, _react_on)
-                await message.channel.send(f"🤐 **React-Only Mode ENABLED for {client.user.display_name}.**")
-                return
-            elif "admin reactonly off" in content_lower:
-                def _react_off(c):
-                    c.setdefault(channel_id, {})["react_only"] = False
-                    return c
-                update_json_file(channel_config_file, {}, _react_off)
-                await message.channel.send(f"🗣️ **React-Only Mode DISABLED for {client.user.display_name}.**")
-                return
-            elif "admin chances" in content_lower:
-                nums = re.findall(r"[\d\.]+", content_lower.split("admin chances")[1])
-                if len(nums) >= 2:
-                    r_val = max(0.0, min(1.0, float(nums[0])))
-                    e_val = max(0.0, min(1.0, float(nums[1])))
-                    def _chances(c):
-                        c.setdefault(channel_id, {})["resp_chance"] = r_val
-                        c[channel_id]["emoji_chance"] = e_val
-                        return c
-                    update_json_file(channel_config_file, {}, _chances)
-                    await message.channel.send(f"🎲 Chances updated for **{client.user.display_name}**: Respond=`{r_val}`, Emoji=`{e_val}`")
-                return
-            elif "admin random" in content_lower:
-                nums = re.findall(r"[\d\.]+", content_lower.split("admin random")[1])
-                if len(nums) >= 1:
-                    int_val = max(0.0, float(nums[0]))
-                    def _rand(c):
-                        c.setdefault(channel_id, {})["random_interval"] = int_val
-                        return c
-                    update_json_file(channel_config_file, {}, _rand)
-                    await message.channel.send(f"⏱️ Random post interval set to `{int_val}` minutes.")
-                return
-            elif "admin temp" in content_lower:
-                nums = re.findall(r"[\d\.]+", content_lower.split("admin temp")[1])
-                if len(nums) >= 1:
-                    t_val = max(0.1, min(1.5, float(nums[0])))
-                    def _temp(c):
-                        c.setdefault(channel_id, {})["temperature"] = t_val
-                        return c
-                    update_json_file(channel_config_file, {}, _temp)
-                    await message.channel.send(f"🌡️ Temperature for **{client.user.display_name}** in this channel set to `{t_val}`.")
-                return
-            elif "admin features" in content_lower:
-                after_feat = content_lower.split("admin features", 1)[1].strip()
-                parts = after_feat.split()
-                if len(parts) >= 2 and parts[0] in ("vision", "gifs", "image", "voice") and parts[1] in ("on", "off", "true", "false"):
-                    feat_key = f"enable_{parts[0]}"
-                    feat_val = parts[1] in ("on", "true")
-                    def _feat(c):
-                        c.setdefault(channel_id, {})[feat_key] = feat_val
-                        return c
-                    update_json_file(channel_config_file, {}, _feat)
-                    await message.channel.send(f"⚙️ Feature `{parts[0]}` set to `{feat_val}` for **{client.user.display_name}** in this channel.")
-                return
-            elif "admin status" in content_lower:
-                conf_all = load_json_file(channel_config_file, {}).get(channel_id, {})
-                ltm = load_json_file(long_term_memory_file, [])
-                gen_mem = load_json_file(general_memory_file, [])
-                uprof = load_json_file(user_profiles_file, {})
-                cmem = load_json_file(chat_memory_file, {}).get(channel_id, [])
-                status_msg = (
-                    f"📊 **{client.user.display_name} Channel Status**\n"
-                    f"• Enabled: `{conf_all.get('enabled', True)}` | React-Only: `{conf_all.get('react_only', False)}`\n"
-                    f"• Respond Chance: `{conf_all.get('resp_chance', chance_to_respond)}` | Emoji Chance: `{conf_all.get('emoji_chance', random_emoji_chance)}` | Random Interval: `{conf_all.get('random_interval', default_random_interval)}m`\n"
-                    f"• Temperature: `{conf_all.get('temperature', temperature)}` | Keywords: `{', '.join(keywords or [])}`\n"
-                    f"• Active Media: Vision=`{conf_all.get('enable_vision', enable_vision)}`, Image/MemeGen=`{conf_all.get('enable_image', enable_image_gen)}`, Voice=`{conf_all.get('enable_voice', enable_voice)}`, GIFs=`{conf_all.get('enable_gifs', enable_gifs)}`\n"
-                    f"• Memory: `{len(cmem)}` recent msgs | `{len(ltm)}` server facts | `{len(gen_mem)}` general facts | `{len(uprof)}` user profiles"
-                )
-                await message.channel.send(status_msg)
-                return
-            elif "admin memory" in content_lower:
-                ltm = load_json_file(long_term_memory_file, [])
-                gen_mem = load_json_file(general_memory_file, [])
-                uprof = load_json_file(user_profiles_file, {})
-                ltm_str = "\n".join(f"• {f}" for f in ltm[-8:]) if ltm else "None"
-                gen_str = "\n".join(f"• {f}" for f in gen_mem[-8:]) if gen_mem else "None"
-                uprof_str = "\n".join(f"• **{u}**: {'; '.join(facts[-5:])}" for u, facts in uprof.items() if facts) if uprof else "None"
-                mem_msg = (
-                    f"🧠 **{client.user.display_name} Memory Snapshot**\n"
-                    f"**Server Lore:**\n{ltm_str}\n"
-                    f"**Shared General Facts:**\n{gen_str}\n"
-                    f"**User Profiles:**\n{uprof_str}"
-                )
-                await message.channel.send(mem_msg[:1950])
-                return
-            elif "admin learnuser" in content_lower:
-                raw_arg = re.split(r'admin\s+learnuser', message.content, flags=re.IGNORECASE)[1].strip()
-                if "|" in raw_arg:
-                    u_part, f_part = raw_arg.split("|", 1)
-                    u_clean = u_part.strip().lstrip("@").strip()
-                    f_clean = f_part.strip().rstrip(".")
-                    if u_clean and f_clean:
-                        def _manual_uprof(uprof_data):
-                            canon = find_canonical_username(u_clean, uprof_data, {u_clean})
-                            uprof_data.setdefault(canon, [])
-                            consolidate_and_append_fact(f_clean, uprof_data[canon], max_items=30)
-                            return uprof_data
-                        update_json_file(user_profiles_file, {}, _manual_uprof)
-                        await message.channel.send(f"📝 Saved fact for **{u_clean}**: `{f_clean}`")
-                return
-            elif "admin learngeneral" in content_lower:
-                raw_fact = re.split(r'admin\s+learngeneral', message.content, flags=re.IGNORECASE)[1].strip().rstrip(".")
-                if raw_fact:
-                    def _manual_gen(gen_list):
-                        if not isinstance(gen_list, list):
-                            gen_list = []
-                        consolidate_and_append_fact(raw_fact, gen_list, max_items=80)
-                        return gen_list
-                    update_json_file(general_memory_file, [], _manual_gen)
-                    await message.channel.send(f"🌐 Saved shared general fact: `{raw_fact}`")
-                return
-            elif "admin learn" in content_lower:
-                raw_fact = re.split(r'admin\s+learn', message.content, flags=re.IGNORECASE)[1].strip().rstrip(".")
-                if raw_fact:
-                    def _manual_ltm(ltm_list):
-                        if not isinstance(ltm_list, list):
-                            ltm_list = []
-                        consolidate_and_append_fact(raw_fact, ltm_list, max_items=60)
-                        return ltm_list
-                    update_json_file(long_term_memory_file, [], _manual_ltm)
-                    await message.channel.send(f"📝 Saved server fact: `{raw_fact}`")
-                return
-            elif "admin forget" in content_lower:
-                target_kw = message.content.lower().split("admin forget", 1)[1].strip()
-                if target_kw:
-                    removed_count = 0
-                    def _forget_ltm(ltm_list):
-                        nonlocal removed_count
-                        kept = [f for f in ltm_list if target_kw not in f.lower()]
-                        removed_count += (len(ltm_list) - len(kept))
-                        return kept
-                    update_json_file(long_term_memory_file, [], _forget_ltm)
-                    update_json_file(general_memory_file, [], _forget_ltm)
-
-                    def _forget_uprof(uprof_dict):
-                        nonlocal removed_count
-                        for u in list(uprof_dict.keys()):
-                            if isinstance(uprof_dict[u], list):
-                                before = len(uprof_dict[u])
-                                uprof_dict[u] = [f for f in uprof_dict[u] if target_kw not in f.lower()]
-                                removed_count += (before - len(uprof_dict[u]))
-                        return uprof_dict
-                    update_json_file(user_profiles_file, {}, _forget_uprof)
-                    await message.channel.send(f"🗑️ Removed `{removed_count}` memory entries matching `{target_kw}`.")
-                return
-            elif "!clearmemory" in content_lower:
-                def _clear(cm):
-                    cm[channel_id] = []
-                    return cm
-                update_json_file(chat_memory_file, {}, _clear)
-
-                def _clear_ch_cache(c):
-                    gen_list = c.get("_generated_images", [])
-                    if isinstance(gen_list, list):
-                        c["_generated_images"] = [
-                            r for r in gen_list
-                            if isinstance(r, dict) and r.get("channel_id") != channel_id
-                        ]
-                    f_map = c.get("_active_followup_bot", {})
-                    if isinstance(f_map, dict):
-                        f_map.pop(channel_id, None)
-                        f_map.pop(str(channel_id), None)
-                    return c
-                update_json_file(shared_image_cache_file, {}, _clear_ch_cache)
-
-                channel_followup_state[channel_id] = {
-                    "timestamp": 0.0,
-                    "turns_used": 999,
-                    "active": False,
-                    "bot_msg_id": ""
-                }
-                await message.channel.send("🧹 **Short-term channel memory & recent media cache cleared.**")
-                return
+        if await handle_bot_commands(
+            message=message,
+            client=client,
+            is_admin=is_admin,
+            channel_id=channel_id,
+            system_prompt=system_prompt,
+            chat_memory_file=chat_memory_file,
+            shared_image_cache_file=shared_image_cache_file,
+            long_term_memory_file=long_term_memory_file,
+            user_profiles_file=user_profiles_file,
+            channel_config_file=channel_config_file,
+            general_memory_file=general_memory_file,
+            channel_followup_state=channel_followup_state,
+            keywords=keywords,
+            chance_to_respond=chance_to_respond,
+            random_emoji_chance=random_emoji_chance,
+            default_random_interval=default_random_interval,
+            temperature=temperature,
+            enable_vision=enable_vision,
+            enable_image_gen=enable_image_gen,
+            enable_voice=enable_voice,
+            enable_gifs=enable_gifs
+        ):
+            return
 
         # ======================================================================
         # CORE EVENT ROUTING
@@ -720,8 +507,8 @@ def run_bot(
             clean_content = clean_content.replace(f"<@&{role_mention.id}>", f"@{getattr(role_mention, 'name', 'role')}")
 
         has_keyword = any(
-            re.search(rf'\b{re.escape(kw.lower())}\b', clean_content.lower())
-            for kw in (keywords or [])
+            re.search(rf'\b{_term_boundary_pattern(kw.lower())}', clean_content.lower())
+            for kw in (keywords or []) if kw and kw.strip()
         )
         directed_at_other_bot = is_command_directed_at_other_bot(
             clean_content, message, client.user.id, client.user.display_name, keywords, shared_image_cache_file
@@ -735,7 +522,22 @@ def run_bot(
         chat_memory = load_json_file(chat_memory_file, {})
         chat_history_list = chat_memory.get(channel_id, [])
 
-        is_explicit_trigger = client.user.mentioned_in(message) or has_keyword or replied_to_self
+        user_profiles_snapshot = load_json_file(user_profiles_file, {})
+        speaker_affinity = get_user_affinity_score(
+            user_profiles_snapshot,
+            message.author.display_name,
+            persona_prompt=system_prompt.get("content", "")
+        )
+
+        addressed_by_fellow_bot = (
+            is_directly_addressed_by_fellow_bot(
+                clean_content, message, client.user.id, client.user.display_name,
+                keywords, shared_image_cache_file, replied_to_self=replied_to_self
+            )
+            if is_author_bot
+            else False
+        )
+        is_explicit_trigger = client.user.mentioned_in(message) or has_keyword or replied_to_self or addressed_by_fellow_bot
 
         if is_explicit_trigger and not directed_at_other_bot and not is_author_bot:
             channel_followup_state[channel_id] = {
@@ -749,7 +551,21 @@ def run_bot(
                 f_map = c.get("_active_followup_bot", {})
                 if not isinstance(f_map, dict):
                     f_map = {}
-                f_map[channel_id] = client.user.id
+                msg_owners = c.get("_msg_addressed_bots", {})
+                if not isinstance(msg_owners, dict):
+                    msg_owners = {}
+                m_key = str(message.id)
+                cur_list = msg_owners.get(m_key, [])
+                if not isinstance(cur_list, list):
+                    cur_list = []
+                if client.user.id not in cur_list:
+                    cur_list.append(client.user.id)
+                msg_owners[m_key] = cur_list
+                if len(msg_owners) > 50:
+                    for old_k in list(msg_owners.keys())[:-50]:
+                        msg_owners.pop(old_k, None)
+                c["_msg_addressed_bots"] = msg_owners
+                f_map[channel_id] = cur_list if len(cur_list) > 1 else client.user.id
                 c["_active_followup_bot"] = f_map
                 return c
             update_json_file(shared_image_cache_file, {}, _set_active_followup_owner)
@@ -771,7 +587,8 @@ def run_bot(
                 followup_timeout=followup_timeout,
                 api_key=api_key,
                 text_model=text_model,
-                api_url=api_url
+                api_url=api_url,
+                speaker_affinity=speaker_affinity
             )
             if is_contextual_followup and not reply_context_str:
                 reply_context_str = followup_context_str
@@ -786,7 +603,9 @@ def run_bot(
                 else:
                     break
 
-        bot_to_bot_cooldown = 300
+        # Allow a responsive 60s cooldown when a fellow bot directly addresses/replies to this bot,
+        # while keeping a 240s cooldown for unprompted bot-to-bot chime-ins (capped at 2 consecutive bot turns)
+        bot_to_bot_cooldown = 60 if addressed_by_fellow_bot else 240
         time_since_last_b2b = time.time() - conf.get("last_bot_to_bot", 0)
 
         has_media_candidate = is_visual_media_candidate(message)
@@ -796,7 +615,8 @@ def run_bot(
             is_author_bot=is_author_bot,
             persona_prompt=system_prompt.get("content", ""),
             chat_history_list=chat_history_list,
-            my_bot_id=client.user.id
+            my_bot_id=client.user.id,
+            speaker_affinity=speaker_affinity
         )
         effective_resp_chance = min(0.85, current_resp_chance * spontaneous_mult)
 
@@ -977,6 +797,11 @@ def run_bot(
 
         guild_members = getattr(message.guild, "members", None) if message.guild else None
         other_bots_meta = get_other_active_bots(shared_image_cache_file, client.user.id, guild_members)
+        my_own_kw_set = {k.strip().lower() for k in (keywords or []) if k and k.strip()}
+        for part in re.findall(r'[a-z0-9]+', client.user.display_name.lower()):
+            if len(part) >= 3 and part not in ("bot", "guild", "the"):
+                my_own_kw_set.add(part)
+
         other_bot_kw_set = set()
         other_bot_names_set = set()
         other_bot_display_list = []
@@ -985,18 +810,22 @@ def run_bot(
                 other_bot_names_set.add(ob["display_name"].lower())
                 other_bot_display_list.append(ob["display_name"])
             for kw_item in ob.get("keywords", []):
-                if len(kw_item) >= 3:
-                    other_bot_kw_set.add(kw_item.lower())
+                kw_l = kw_item.strip().lower()
+                if len(kw_l) >= 3 and kw_l not in my_own_kw_set:
+                    other_bot_kw_set.add(kw_l)
             for al_item in ob.get("aliases", []):
-                other_bot_names_set.add(al_item.lower())
-                first_tok = al_item.split()[0] if al_item.split() else ""
-                if len(first_tok) >= 3 and first_tok not in ("bot", "guild", "the"):
-                    other_bot_kw_set.add(first_tok)
+                al_low = al_item.lower()
+                other_bot_names_set.add(al_low)
+                if "'s " not in al_low and "’s " not in al_low and "bots " not in al_low:
+                    first_tok = al_low.split()[0] if al_low.split() else ""
+                    if len(first_tok) >= 3 and first_tok not in ("bot", "guild", "the") and first_tok not in my_own_kw_set:
+                        other_bot_kw_set.add(first_tok)
 
-        effective_emoji_chance = min(0.95, current_emoji_chance * (0.20 if is_author_bot else min(1.45, spontaneous_mult)))
+        bot_emoji_scale = (0.45 if abs(speaker_affinity) >= 15 else 0.25) if is_author_bot else min(1.45, spontaneous_mult)
+        effective_emoji_chance = min(0.95, current_emoji_chance * bot_emoji_scale)
         reacted_emoji = None
         react_task = None
-        should_react = (is_explicit_trigger and not is_author_bot and current_emoji_chance > 0) or (random.random() < effective_emoji_chance)
+        should_react = (is_explicit_trigger and current_emoji_chance > 0 and (not is_author_bot or addressed_by_fellow_bot)) or (random.random() < effective_emoji_chance)
 
         if should_react:
             react_task = asyncio.create_task(
@@ -1013,7 +842,8 @@ def run_bot(
                     emoji_context_length=emoji_context_length,
                     bot_name=client.user.display_name,
                     other_bot_keywords=other_bot_kw_set,
-                    emoji_reaction_hint=emoji_reaction_hint
+                    emoji_reaction_hint=emoji_reaction_hint,
+                    speaker_affinity=speaker_affinity
                 )
             )
 
@@ -1189,6 +1019,9 @@ def run_bot(
 
                         user_profiles = load_json_file(user_profiles_file, {})
                         recent_users = set(msg.get("author_name") for msg in raw_history if msg.get("author_name"))
+                        for ob_disp in other_bot_display_list:
+                            if ob_disp:
+                                recent_users.add(ob_disp)
                         for known_user in user_profiles.keys():
                             if str(known_user).lower() in combined_recent_prompt.lower() or str(known_user).lower() in reply_context_str.lower():
                                 recent_users.add(str(known_user))
@@ -1199,7 +1032,10 @@ def run_bot(
                             current_speaker=message.author.display_name,
                             combined_recent_prompt=combined_recent_prompt,
                             reply_context_str=reply_context_str,
-                            is_spontaneous=(not is_relevant_trigger)
+                            is_spontaneous=(not is_relevant_trigger),
+                            persona_prompt=system_prompt.get("content", ""),
+                            other_bot_names=other_bot_display_list,
+                            my_bot_name=client.user.display_name
                         )
                         if active_user_block:
                             dynamic_system["content"] += active_user_block
@@ -1309,6 +1145,15 @@ def run_bot(
                                 )
                             })
 
+                        if PERSONAL_FACT_STATEMENT_REGEX.search(combined_recent_prompt or ""):
+                            api_messages.append({
+                                "role": "system",
+                                "content": (
+                                    f"System Memory Reminder: {message.author.display_name} just shared a personal detail, preference, project, or situation! "
+                                    f"Append `[LEARN_USER: {message.author.display_name} | specific 8-20 word objective fact]` (or `[LEARN: ...]` for a group/bot situation) at the very end of your response so you remember it."
+                                )
+                            })
+
                         text_only_messages = copy.deepcopy(api_messages)
 
                         if image_bytes and ch_enable_vision:
@@ -1348,8 +1193,8 @@ def run_bot(
                                 api_url,
                                 headers={"Authorization": f"Bearer {api_key}"},
                                 json_payload=payload,
-                                timeout=55,
-                                max_retries=3,
+                                timeout=(8, 22),
+                                max_retries=2,
                                 bot_name=client.user.display_name,
                                 glitch_tracker=turn_glitch_tracker,
                                 inject_glitch_on_retry=True
@@ -1394,7 +1239,7 @@ def run_bot(
                                     api_url,
                                     headers={"Authorization": f"Bearer {api_key}"},
                                     json_payload=fb_v_payload,
-                                    timeout=35,
+                                    timeout=(6, 18),
                                     max_retries=1,
                                     bot_name=client.user.display_name,
                                     glitch_tracker=turn_glitch_tracker
@@ -1427,7 +1272,7 @@ def run_bot(
                                     api_url,
                                     headers={"Authorization": f"Bearer {api_key}"},
                                     json_payload=fb_payload,
-                                    timeout=35,
+                                    timeout=(6, 18),
                                     max_retries=1,
                                     bot_name=client.user.display_name,
                                     glitch_tracker=turn_glitch_tracker
@@ -1451,35 +1296,87 @@ def run_bot(
                                 raw_voice_content = None
 
                             learned_notifications = []
-                            learn_user_matches = LEARN_USER_EXTRACT_REGEX.findall(reply) if is_relevant_trigger else []
-                            if learn_user_matches and not is_author_bot:
-                                verified_user_facts = await verify_and_resolve_user_facts(
-                                    candidate_facts=learn_user_matches,
-                                    speaker_name=message.author.display_name,
-                                    recent_user_prompt=combined_recent_prompt,
-                                    raw_history=raw_history,
+                            allow_turn_learning = (is_relevant_trigger or len(clean_content.split()) >= 4)
+                            # Cap explicit [LEARN_USER:] extractions to at most 2 per turn so learning is detailed but never excessive
+                            learn_user_matches = list(LEARN_USER_EXTRACT_REGEX.findall(reply))[:2] if allow_turn_learning else []
+                            if allow_turn_learning:
+                                implicit_self_facts = extract_implicit_user_facts_from_message(
+                                    message.author.display_name,
+                                    combined_recent_prompt,
                                     user_profiles=user_profiles,
-                                    recent_users=recent_users,
-                                    other_bot_names=other_bot_names_set,
+                                    persona_prompt=system_prompt.get("content", ""),
                                     my_bot_name=client.user.display_name,
-                                    api_key=api_key,
-                                    text_model=text_model,
-                                    api_url=api_url
+                                    is_speaker_bot=is_author_bot,
+                                    bot_reply_text=reply
                                 )
-                                if verified_user_facts:
-                                    def _save_user_facts(uprof_data):
-                                        for canonical_uname, clean_fact in verified_user_facts:
-                                            if canonical_uname and clean_fact and canonical_uname.lower() != client.user.display_name.lower():
-                                                if canonical_uname not in uprof_data or not isinstance(uprof_data[canonical_uname], list):
-                                                    uprof_data[canonical_uname] = []
-                                                if consolidate_and_append_fact(clean_fact, uprof_data[canonical_uname], max_items=30):
-                                                    learned_notifications.append(f"learned about {canonical_uname}")
-                                        return uprof_data
-                                    update_json_file(user_profiles_file, {}, _save_user_facts)
+                                for imp_u, imp_f in implicit_self_facts:
+                                    if not any(imp_f.lower() in existing_f.lower() or existing_f.lower() in imp_f.lower() for _, existing_f in learn_user_matches):
+                                        learn_user_matches.append((imp_u, imp_f))
 
-                            allow_fact_learning = (is_relevant_trigger and not is_author_bot and len(clean_content.split()) >= 4)
-                            raw_gen_matches = LEARN_GENERAL_EXTRACT_REGEX.findall(reply) if allow_fact_learning else []
-                            raw_srv_matches = LEARN_EXTRACT_REGEX.findall(reply) if allow_fact_learning else []
+                            if learn_user_matches:
+                                verify_task = asyncio.create_task(
+                                    verify_and_resolve_user_facts(
+                                        candidate_facts=learn_user_matches,
+                                        speaker_name=message.author.display_name,
+                                        recent_user_prompt=combined_recent_prompt,
+                                        raw_history=raw_history,
+                                        user_profiles=user_profiles,
+                                        recent_users=recent_users,
+                                        other_bot_names=other_bot_names_set,
+                                        my_bot_name=client.user.display_name,
+                                        api_key=api_key,
+                                        text_model=text_model,
+                                        api_url=api_url
+                                    )
+                                )
+                                done_v, _ = await asyncio.wait({verify_task}, timeout=0.15)
+                                if verify_task in done_v:
+                                    try:
+                                        verified_user_facts = verify_task.result()
+                                        if verified_user_facts:
+                                            def _save_user_facts_fast(uprof_data):
+                                                for canonical_uname, clean_fact in verified_user_facts:
+                                                    if (
+                                                        canonical_uname
+                                                        and clean_fact
+                                                        and canonical_uname.lower() != client.user.display_name.lower()
+                                                        and _extract_base_username(canonical_uname) != _extract_base_username(client.user.display_name)
+                                                    ):
+                                                        if canonical_uname not in uprof_data or not isinstance(uprof_data[canonical_uname], list):
+                                                            uprof_data[canonical_uname] = []
+                                                        if consolidate_and_append_fact(clean_fact, uprof_data[canonical_uname], max_items=35):
+                                                            note_txt = f"learned about {canonical_uname}"
+                                                            if note_txt not in learned_notifications:
+                                                                learned_notifications.append(note_txt)
+                                                return uprof_data
+                                            update_json_file(user_profiles_file, {}, _save_user_facts_fast)
+                                    except Exception as vf_err:
+                                        print(f"[{client.user.display_name}] [WARN] Fast-path user-fact save error: {vf_err}")
+                                else:
+                                    async def _finish_bg_verify(vt=verify_task):
+                                        try:
+                                            verified_bg = await vt
+                                            if verified_bg:
+                                                def _save_user_facts_bg(uprof_data):
+                                                    for canonical_uname, clean_fact in verified_bg:
+                                                        if (
+                                                            canonical_uname
+                                                            and clean_fact
+                                                            and canonical_uname.lower() != client.user.display_name.lower()
+                                                            and _extract_base_username(canonical_uname) != _extract_base_username(client.user.display_name)
+                                                        ):
+                                                            if canonical_uname not in uprof_data or not isinstance(uprof_data[canonical_uname], list):
+                                                                uprof_data[canonical_uname] = []
+                                                            consolidate_and_append_fact(clean_fact, uprof_data[canonical_uname], max_items=35)
+                                                    return uprof_data
+                                                update_json_file(user_profiles_file, {}, _save_user_facts_bg)
+                                        except Exception as bg_err:
+                                            print(f"[{client.user.display_name}] [WARN] Background user-fact verification error: {bg_err}")
+                                    asyncio.create_task(_finish_bg_verify())
+
+                            allow_fact_learning = (allow_turn_learning and len(clean_content.split()) >= 3)
+                            raw_gen_matches = LEARN_GENERAL_EXTRACT_REGEX.findall(reply)[:1] if allow_fact_learning else []
+                            raw_srv_matches = LEARN_EXTRACT_REGEX.findall(reply)[:1] if allow_fact_learning else []
                             routed_srv_facts, routed_gen_facts = route_server_vs_general_facts(
                                 raw_server_facts=raw_srv_matches,
                                 raw_general_facts=raw_gen_matches,
@@ -1543,8 +1440,26 @@ def run_bot(
                                 bot_promised_visual_in_text = bool(BOT_IMAGE_PROMISE_REGEX.search(reply))
 
                                 if img_prompt and not (is_explicit_img_req or is_explicit_meme_req or bot_promised_visual_in_text):
-                                    if other_bot_just_generated_on_msg or self_recently_generated or is_topic_change_req or is_short_reaction_msg:
-                                        print(f"[{client.user.display_name}] [INFO] Suppressing unsolicited image/meme (cooldown/topic-pivot/short-reaction guard).")
+                                    claimed_unsolicited_img = False
+                                    if not (other_bot_just_generated_on_msg or self_recently_generated or is_topic_change_req or is_short_reaction_msg):
+                                        def _claim_unsolicited_img_slot(c):
+                                            nonlocal claimed_unsolicited_img
+                                            img_claims = c.get("_claimed_img_gen_msgs", {})
+                                            if not isinstance(img_claims, dict):
+                                                img_claims = {}
+                                            existing_bot = img_claims.get(str(message.id))
+                                            if existing_bot is None or existing_bot == client.user.id:
+                                                img_claims[str(message.id)] = client.user.id
+                                                if len(img_claims) > 50:
+                                                    for old_k in list(img_claims.keys())[:-50]:
+                                                        img_claims.pop(old_k, None)
+                                                c["_claimed_img_gen_msgs"] = img_claims
+                                                claimed_unsolicited_img = True
+                                            return c
+                                        update_json_file(shared_image_cache_file, {}, _claim_unsolicited_img_slot)
+
+                                    if not claimed_unsolicited_img:
+                                        print(f"[{client.user.display_name}] [INFO] Suppressing unsolicited image/meme (cooldown/concurrent-bot-claim/topic-pivot guard).")
                                         img_prompt = None
                                         meme_top_text = ""
                                         meme_bottom_text = ""
@@ -1717,6 +1632,8 @@ def run_bot(
                                 sent_msg = await message.channel.send(files=files_to_send)
                     except discord.errors.HTTPException as e:
                         print(f"[{client.user.display_name}] [ERROR] Discord upload failed: {e}")
+                        image_file = None
+                        voice_file = None
                         sent_msg = await message.channel.send(
                             f"{final_reply}\n*(System: Failed to upload media file. It may be corrupted or too large.)*"
                         )
@@ -1751,7 +1668,8 @@ def run_bot(
                             )
                             new_turns_used = 0 if is_explicit_trigger else (prev_turns_used + 1)
 
-                            if max_followup_turns <= 0 or new_turns_used >= max_followup_turns:
+                            effective_max_followup = (max_followup_turns + 1) if (max_followup_turns > 0 and speaker_affinity >= 45) else max_followup_turns
+                            if effective_max_followup <= 0 or new_turns_used >= effective_max_followup:
                                 channel_followup_state[channel_id] = {
                                     "timestamp": time.time(),
                                     "turns_used": new_turns_used,
@@ -1771,7 +1689,12 @@ def run_bot(
                                     f_map = c.get("_active_followup_bot", {})
                                     if not isinstance(f_map, dict):
                                         f_map = {}
-                                    f_map[channel_id] = client.user.id
+                                    msg_owners = c.get("_msg_addressed_bots", {})
+                                    cur_list = msg_owners.get(str(message.id), []) if isinstance(msg_owners, dict) else []
+                                    if isinstance(cur_list, list) and len(cur_list) > 1 and client.user.id in cur_list:
+                                        f_map[channel_id] = cur_list
+                                    else:
+                                        f_map[channel_id] = client.user.id
                                     c["_active_followup_bot"] = f_map
                                     return c
                                 update_json_file(shared_image_cache_file, {}, _claim_followup_owner_after_reply)
