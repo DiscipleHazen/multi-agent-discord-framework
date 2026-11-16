@@ -661,7 +661,30 @@ def run_bot(
 
         update_json_file(long_term_memory_file, [], _clean_ltm_list)
         update_json_file(general_memory_file, [], _clean_ltm_list)
-        update_json_file(user_profiles_file, {}, _clean_uprof_dict)
+
+        def _clean_and_seed_uprof(d):
+            if not isinstance(d, dict):
+                d = {}
+            for u_key in list(d.keys()):
+                if isinstance(d[u_key], list):
+                    d[u_key] = [f for f in d[u_key] if isinstance(f, str) and not is_ephemeral_or_banter_fact(f)]
+            # Seed initial fellow-bot relationships from persona bio if not yet logged
+            other_b_init = get_other_active_bots(shared_image_cache_file, client.user.id)
+            from memory_and_context import infer_persona_affinity_seed, _format_rapport_entry
+            bio_txt = system_prompt.get("content", "")
+            for ob in other_b_init:
+                ob_name = str(ob.get("display_name", "") or "").strip()
+                if not ob_name:
+                    continue
+                canon_ob = find_canonical_username(ob_name, d, {ob_name})
+                existing_ob = d.get(canon_ob, [])
+                if not existing_ob:
+                    seed_sc, seed_cat = infer_persona_affinity_seed(bio_txt, ob_name)
+                    if seed_sc != 0 or seed_cat:
+                        d[canon_ob] = [_format_rapport_entry(seed_sc, "Persona Bond" if seed_sc > 0 else "Comedic Foil", seed_cat)]
+            return d
+
+        update_json_file(user_profiles_file, {}, _clean_and_seed_uprof)
 
         if not random_loop_started:
             random_loop_started = True
@@ -1698,7 +1721,9 @@ def run_bot(
                                                         if canonical_uname not in uprof_data or not isinstance(uprof_data[canonical_uname], list):
                                                             uprof_data[canonical_uname] = []
                                                         if consolidate_and_append_fact(clean_fact, uprof_data[canonical_uname], max_items=35):
-                                                            note_txt = f"learned about {canonical_uname}"
+                                                            from subconscious_engine import format_fact_for_display
+                                                            disp_fact = format_fact_for_display(clean_fact, include_badge=False)
+                                                            note_txt = f"learned about {canonical_uname}: {disp_fact}" if disp_fact else f"learned about {canonical_uname}"
                                                             if note_txt not in learned_notifications:
                                                                 learned_notifications.append(note_txt)
                                                 return uprof_data
@@ -1913,16 +1938,19 @@ def run_bot(
                             if voice_err:
                                 reply = f"{reply}\n{voice_err}".strip()
 
-                            if learned_notifications:
-                                notes_str = " | ".join(f"{client.user.display_name} {n}" for n in learned_notifications)
-                                reply = f"{reply}\n*({notes_str})*".strip()
-
                             if not reply and not final_gif and not image_file and not voice_file:
                                 if not is_explicit_trigger:
                                     print(f"[{client.user.display_name}] [INFO] Blank output after tag stripping on non-explicit turn; staying silent.")
                                     return
-                                is_error_reply = True
-                                reply = "*(Brain empty. The API returned a blank response.)*"
+                                if learned_notifications:
+                                    reply = "Got it, I'll keep that in mind!"
+                                else:
+                                    is_error_reply = True
+                                    reply = "*(Brain empty. The API returned a blank response.)*"
+
+                            if learned_notifications and not is_error_reply:
+                                notes_str = " | ".join(f"{client.user.display_name} {n}" for n in learned_notifications)
+                                reply = f"{reply}\n*({notes_str})*".strip()
 
                             final_reply = reply
 

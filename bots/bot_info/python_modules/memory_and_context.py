@@ -456,6 +456,16 @@ def infer_persona_affinity_seed(persona_prompt: str, target_name: str) -> tuple[
     candidate_terms = [base_target]
     if base_target.endswith(" bot") and len(base_target) > 6:
         candidate_terms.append(base_target[:-4].strip())
+    if "'s " in base_target or "’s " in base_target:
+        norm_apos = base_target.replace("’", "'")
+        owner_part, pet_part = norm_apos.split("'s ", 1)
+        if owner_part and pet_part:
+            candidate_terms.append(f"{owner_part} bot's {pet_part}")
+            candidate_terms.append(f"{pet_part} bot")
+    if base_target.endswith(" cat") or base_target == "cat":
+        for alias_t in ("cat bot", "uwu bot's cat", "uwu's cat"):
+            if alias_t not in candidate_terms:
+                candidate_terms.append(alias_t)
 
     direct_with_sentences = []
     matching_sentences = []

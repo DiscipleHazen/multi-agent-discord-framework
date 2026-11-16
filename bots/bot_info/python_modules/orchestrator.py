@@ -1112,13 +1112,25 @@ def build_control_plane_state_snapshot(
     gkm = list(load_json_file(general_memory_file, []) if general_memory_file else [])
     ch_configs = dict(load_json_file(channel_config_file, {}) if channel_config_file else {})
 
-    # Also merge per-bot `<bot>_user_profiles.json`, `<bot>_long_term_memory.json`, and `<bot>_channel_configs.json`
+    # Track per-bot user profiles & persona prompts so the Social Graph builds directed edges for EVERY bot!
+    per_bot_uprof: dict[str, dict] = {}
+    per_bot_prompts: dict[str, str] = {}
+    for b_key_name, mb_obj in supervisor.bots.items():
+        try:
+            if os.path.exists(mb_obj.script_path):
+                with open(mb_obj.script_path, "r", encoding="utf-8", errors="ignore") as bf:
+                    per_bot_prompts[b_key_name.lower()] = bf.read(25000)
+        except Exception:
+            pass
+
     ltm_dir = os.path.dirname(long_term_memory_file) if long_term_memory_file else ""
     cfg_dir = os.path.dirname(channel_config_file) if channel_config_file else ""
     if ltm_dir and os.path.isdir(ltm_dir):
         for up_path in sorted(glob.glob(os.path.join(ltm_dir, "*_user_profiles.json"))):
+            b_prefix = os.path.basename(up_path).replace("_user_profiles.json", "").strip().lower()
             sub_u = load_json_file(up_path, {})
             if isinstance(sub_u, dict):
+                per_bot_uprof[b_prefix] = sub_u
                 for uk, uv in sub_u.items():
                     if isinstance(uv, list):
                         uprof.setdefault(uk, []).extend(x for x in uv if x not in uprof.get(uk, []))
@@ -1136,51 +1148,102 @@ def build_control_plane_state_snapshot(
                     if isinstance(cv, dict):
                         ch_configs.setdefault(ck, {}).update(cv)
 
-    # 1. Social Graph Nodes & Signed Directed Edges
+    # 1. Social Graph Nodes & Signed Directed Edges (Multi-Bot Source-Aware + Persona-Bio Seeded!)
     active_bots_reg = scache.get("_active_bots", {}) if isinstance(scache.get("_active_bots"), dict) else {}
     bot_names = [
         str(info.get("display_name", "")).strip()
         for info in active_bots_reg.values()
         if isinstance(info, dict) and info.get("display_name")
     ]
+    for mb_name in supervisor.bots.keys():
+        if not any(mb_name.lower().replace("_", "") in bn.lower().replace(" ", "").replace("'", "") for bn in bot_names):
+            bot_names.append(mb_name)
+
     nodes_map: dict[str, dict] = {}
+    bot_key_to_disp: dict[str, str] = {}
     for bn in bot_names:
         b_key = _extract_base_username(bn)
         if b_key:
+            bot_key_to_disp[b_key] = bn
             nodes_map[b_key] = {"id": b_key, "label": bn, "type": "bot", "affinity_avg": 0}
 
+    def _match_bot_source(b_key: str) -> tuple[dict, str]:
+        """Finds the matching `<bot>_user_profiles.json` dict and persona prompt for `b_key`."""
+        norm_b = re.sub(r"[^a-z0-9]", "", b_key.lower())
+        best_prof = {}
+        best_prompt = ""
+        for p_k, p_dict in per_bot_uprof.items():
+            norm_pk = re.sub(r"[^a-z0-9]", "", p_k.lower())
+            if norm_pk and (norm_pk in norm_b or norm_b in norm_pk or ("cat" in norm_pk and "cat" in norm_b)):
+                best_prof = p_dict
+                break
+        for pr_k, pr_txt in per_bot_prompts.items():
+            norm_prk = re.sub(r"[^a-z0-9]", "", pr_k.lower())
+            if norm_prk and (norm_prk in norm_b or norm_b in norm_prk or ("cat" in norm_prk and "cat" in norm_b)):
+                best_prompt = pr_txt
+                break
+        return best_prof, best_prompt
+
     edges = []
-    for target_user, facts_list in (uprof or {}).items():
-        if not isinstance(target_user, str) or target_user.startswith("_") or not isinstance(facts_list, list):
-            continue
-        t_key = _extract_base_username(target_user)
-        if not t_key:
-            continue
-        is_bot_target = any(_extract_base_username(bn) == t_key for bn in bot_names)
-        sc, tr, cat, _ = _extract_saved_rapport_state_full(facts_list, target_name=target_user)
-        tier = _get_disposition_tier_label(sc)
-        arch = _derive_relationship_archetype(sc, tr, is_fellow_bot=is_bot_target, had_past_friction=(sc < 0))
-        nodes_map.setdefault(
-            t_key,
-            {
-                "id": t_key,
-                "label": target_user,
-                "type": "bot" if is_bot_target else "human",
-                "affinity": sc,
-                "tier": tier,
-                "archetype": arch,
-                "trend": tr,
-                "catalyst": cat,
-            },
-        )
-        nodes_map[t_key].update({"affinity": sc, "tier": tier, "archetype": arch, "trend": tr, "catalyst": cat})
-        source_id = _extract_base_username(bot_names[0]) if bot_names else "server_bots"
-        if source_id not in nodes_map:
-            nodes_map[source_id] = {"id": source_id, "label": bot_names[0] if bot_names else "Server Bots", "type": "bot"}
-        if source_id != t_key:
+    seen_edge_pairs: set[tuple[str, str]] = set()
+
+    # Build directed edges from EACH bot to every human regular AND every fellow bot
+    all_human_targets = [
+        k for k in (uprof or {}).keys()
+        if isinstance(k, str) and not k.startswith("_")
+    ]
+    for src_b_key, src_b_disp in bot_key_to_disp.items():
+        src_uprof_dict, src_bio_prompt = _match_bot_source(src_b_key)
+        if not src_uprof_dict and len(bot_key_to_disp) == 1:
+            src_uprof_dict = uprof
+
+        # Candidate targets for this bot: all humans in its profile + all other active bots
+        candidate_targets = list(src_uprof_dict.keys())
+        for other_b_disp in bot_names:
+            if _extract_base_username(other_b_disp) != src_b_key and other_b_disp not in candidate_targets:
+                candidate_targets.append(other_b_disp)
+        for h_t in all_human_targets:
+            if h_t not in candidate_targets and h_t in src_uprof_dict:
+                candidate_targets.append(h_t)
+
+        for target_user in candidate_targets:
+            if not isinstance(target_user, str) or target_user.startswith("_"):
+                continue
+            t_key = _extract_base_username(target_user)
+            if not t_key or t_key == src_b_key or (src_b_key, t_key) in seen_edge_pairs:
+                continue
+            facts_list = src_uprof_dict.get(target_user, [])
+            if not isinstance(facts_list, list):
+                facts_list = []
+            is_bot_target = (t_key in bot_key_to_disp) or any(_extract_base_username(bn) == t_key for bn in bot_names)
+            sc, tr, cat, _ = _extract_saved_rapport_state_full(
+                facts_list, persona_prompt=src_bio_prompt, target_name=target_user
+            )
+            if sc == 0 and not facts_list and not cat:
+                continue
+            seen_edge_pairs.add((src_b_key, t_key))
+            tier = _get_disposition_tier_label(sc)
+            arch = _derive_relationship_archetype(sc, tr, is_fellow_bot=is_bot_target, had_past_friction=(sc < 0))
+            nodes_map.setdefault(
+                t_key,
+                {
+                    "id": t_key,
+                    "label": bot_key_to_disp.get(t_key, target_user),
+                    "type": "bot" if is_bot_target else "human",
+                    "affinity": sc,
+                    "tier": tier,
+                    "archetype": arch,
+                    "trend": tr,
+                    "catalyst": cat,
+                },
+            )
+            if not is_bot_target:
+                nodes_map[t_key].update({"affinity": sc, "tier": tier, "archetype": arch, "trend": tr, "catalyst": cat})
             edges.append({
-                "source": source_id,
+                "source": src_b_key,
                 "target": t_key,
+                "source_label": src_b_disp,
+                "target_label": bot_key_to_disp.get(t_key, target_user),
                 "weight": sc,
                 "tier": tier,
                 "archetype": arch,
