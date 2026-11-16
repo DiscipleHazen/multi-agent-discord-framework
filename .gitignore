@@ -36,3 +36,5 @@ env/
 # Ignored Bot Scripts
 bots/*.py
 !bots/guild_assistant.py
+**/cloudflared*
+*.exe

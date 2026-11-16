@@ -8,6 +8,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
 A distributed multi-agent Discord AI framework and SRE process control plane written in Python. Engineered to run 4 to 50+ autonomous, distinct AI personas concurrently within the same Discord channels, this system features an OS-level process supervisor and real-time Server-Sent Events (SSE) Web-UI dashboard, a two-phase Conscious/Subconscious cognitive architecture, Okapi BM25 + Ebbinghaus exponential decay RAG, Heider structural balance social graph dynamics, two-wave multi-agent turn coordination, 64-bit perceptual dHash computer vision with Shannon-entropy/action-flux 2x2 video storyboards, Laplacian edge-energy meme typography, and bidirectional voice (OpenAI Whisper STT + MiMo-V2.5-TTS Director Mode).
+(This was made with a lot of help from Gemini Argon)
 
 ---
 
