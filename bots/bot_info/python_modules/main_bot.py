@@ -23,17 +23,23 @@ from config import (
     LEARN_USER_EXTRACT_REGEX, LEARN_GENERAL_EXTRACT_REGEX, LEARN_EXTRACT_REGEX,
     FALLBACK_IMAGE_NOTE_REGEX, FALLBACK_VISION_MODELS, FALLBACK_TEXT_MODELS,
     TOPIC_CHANGE_REQUEST_REGEX, BARE_FILLER_UTTERANCE_REGEX,
-    INTENTIONAL_NO_RESPONSE_REGEX, PERSONAL_FACT_STATEMENT_REGEX
+    INTENTIONAL_NO_RESPONSE_REGEX, PERSONAL_FACT_STATEMENT_REGEX,
+    IMAGE_REMIX_REQ_REGEX, IMAGE_DESC_EXTRACT_REGEX
 )
 
-from core_system import load_json_file, update_json_file, post_with_backoff, sanitize_url, is_model_circuit_open
+from core_system import (
+    load_json_file, update_json_file, post_with_backoff, sanitize_url,
+    is_model_circuit_open, rank_models_by_ewma_latency, get_all_model_telemetry
+)
 from text_and_parsers import (
-    extract_and_strip_voice_msg, clean_and_compact_reply,
-    derive_chat_text_from_voice, parse_meme_gen_tag
+    extract_and_strip_voice_msg, extract_and_strip_thought_tag,
+    clean_and_compact_reply, derive_chat_text_from_voice,
+    parse_meme_gen_tag, evaluate_deterministic_grounding_tools
 )
 from media_engine import (
     fetch_image_bytes_from_message, fetch_online_gif, get_youtube_metadata,
-    extract_gif_slug, is_visual_media_candidate, extract_webpage_embed_context
+    extract_gif_slug, is_visual_media_candidate, extract_webpage_embed_context,
+    is_audio_voice_attachment, fetch_audio_bytes_from_message
 )
 from memory_and_context import (
     extract_glitch_summary, build_api_messages_from_history, upsert_chat_memory_entry,
@@ -46,22 +52,87 @@ from memory_and_context import (
     _get_disposition_tier_label, _derive_relationship_archetype,
     RAPPORT_ENTRY_REGEX
 )
+from subconscious_engine import (
+    update_message_reaction_ledger,
+    run_subconscious_cognitive_turn,
+    get_and_tick_bot_internal_state,
+)
 from ai_services import (
     summarize_image_for_memory, auto_react, ensure_unique_image_prompt,
     ensure_unique_meme_captions, synthesize_missing_image_prompt,
-    synthesize_missing_meme_spec, generate_image_attachment, generate_voice_attachment
+    synthesize_missing_meme_spec, generate_image_attachment,
+    generate_voice_attachment, transcribe_voice_attachment
 )
 from bot_discovery import (
     register_active_bot, get_other_active_bots, is_command_directed_at_other_bot,
     detect_addressed_bot_name, resolve_contextual_followup,
     compute_spontaneous_interest_multiplier, is_other_bot_in_active_exchange,
-    is_directly_addressed_by_fellow_bot, _term_boundary_pattern
+    is_directly_addressed_by_fellow_bot, _term_boundary_pattern,
+    claim_or_coordinate_turn_wave, mark_turn_wave_complete,
+    pick_fellow_bot_interaction_target
 )
-from commands_and_embeds import handle_bot_commands
+from commands_and_embeds import handle_bot_commands, create_generated_media_view, register_hub_slash_command
 
 # ==============================================================================
-# IN-FILE HELPER FUNCTIONS
+# IN-FILE HELPER FUNCTIONS (INCLUDING UPGRADES #8 & #12)
 # ==============================================================================
+_TERMINAL_PUNCT_CHARS = (".", "?", "!", "~", '"', "”", "'", "’", ")")
+_TECHNICAL_QUERY_CUE_REGEX = re.compile(
+    r"```|\b(?:def\s+\w+|class\s+\w+|import\s+\w+|traceback|syntaxerror|exception|"
+    r"compile|segfault|pointer|algorithm|complexity|big[\s\-]?o|sql|regex|dockerfile|"
+    r"asyncio|pthread| shader|calculus|derivative|integral|matrix|eigen|calculate|solve)\b",
+    re.IGNORECASE,
+)
+_BANTER_ROAST_CUE_REGEX = re.compile(
+    r"\b(?:roast\b|meme\b|shitpost|skill\s+issue|ratio\b|1v1\b|fight\s+me|bet\s+you\s+can['’]?t|"
+    r"banter|joke\b|funny|hilarious|lmao|lmfao)\b",
+    re.IGNORECASE,
+)
+
+
+def compute_adaptive_coalesce_delay(clean_text: str, is_author_bot: bool = False) -> float:
+    """
+    Upgrade #8 — Velocity & Punctuation-Aware Adaptive Coalescing Window:
+    - Fellow bot messages: `0.30s`
+    - Complete punctuated human sentences (>= 5 words ending in `.`, `?`, `!`, `~`):
+      `0.12s` fast-path (saving ~730ms of perceived typing latency on every turn!).
+    - Short unpunctuated fragments (<= 3 words without terminal punctuation):
+      `1.25s` window so rapid split-line typers can finish their second line.
+    - Medium unpunctuated messages: `0.45s`.
+    """
+    if is_author_bot:
+        return 0.30
+    stripped = (clean_text or "").strip()
+    if not stripped:
+        return 0.20
+    words = stripped.split()
+    has_term_punct = stripped.endswith(_TERMINAL_PUNCT_CHARS)
+    if len(words) >= 5 and has_term_punct:
+        return 0.12
+    if len(words) <= 3 and not has_term_punct:
+        return 1.25
+    return 0.45
+
+
+def compute_situational_sampling_params(
+    user_text: str,
+    base_temp: float = 0.78,
+    base_top_p: float = 0.90,
+    is_meme_or_roast: bool = False,
+) -> tuple[float, float]:
+    """
+    Upgrade #12 — Situational Sampling Modulation:
+    Dynamically tunes `(temperature, top_p)` per turn:
+    - Technical / Code / Math mode: `(min(base_temp, 0.45), 0.85)` for high precision.
+    - Banter / Roast / Meme mode: `(max(base_temp, 0.85), 0.92)` for punchy creativity.
+    - Standard conversational mode: `(base_temp, base_top_p)`.
+    """
+    txt = (user_text or "").strip()
+    if _TECHNICAL_QUERY_CUE_REGEX.search(txt):
+        return round(min(float(base_temp), 0.45), 2), 0.85
+    if is_meme_or_roast or _BANTER_ROAST_CUE_REGEX.search(txt):
+        return round(max(float(base_temp), 0.85), 2), 0.92
+    return float(base_temp), float(base_top_p)
 def extract_persona_voice_defaults(system_prompt_content: str, bot_name: str) -> tuple[str, str]:
     role_match = re.search(r'Role:\s*([^\n`\]]+)', system_prompt_content, re.IGNORECASE)
     scene_match = re.search(r'Scene:\s*([^\n`\]]+)', system_prompt_content, re.IGNORECASE)
@@ -205,7 +276,18 @@ def run_bot(
     intents = discord.Intents.default()
     intents.message_content = True
     intents.members = True
+    if hasattr(intents, "reactions"):
+        intents.reactions = True
     client = discord.Client(intents=intents)
+    hub_cmd_tree = register_hub_slash_command(
+        client,
+        system_prompt=system_prompt,
+        chat_memory_file=chat_memory_file,
+        shared_image_cache_file=shared_image_cache_file,
+        user_profiles_file=user_profiles_file,
+        channel_config_file=channel_config_file,
+    )
+    slash_tree_synced = False
     max_history_length = int(os.getenv("MAX_HISTORY_LENGTH", 200))
 
     channel_gen_locks: dict[int, asyncio.Lock] = {}
@@ -215,9 +297,121 @@ def run_bot(
     channel_followup_state: dict[int, dict] = {}
     channel_last_gif_time: dict[int, float] = {}
     random_loop_started = False
+    last_status_sync_ts = 0.0
+    last_synced_status_text = ""
 
     extracted_voice_role = default_voice_role
     extracted_voice_style = default_voice_style
+
+    def record_ipc_heartbeat():
+        """Writes live process telemetry, PID, WebSocket latency, and EWMA model stats for orchestrator.py."""
+        if not client.user:
+            return
+        ws_ms = round(float(getattr(client, "latency", 0.0) or 0.0) * 1000.0, 1)
+        b_id_str = str(client.user.id)
+        b_name = client.user.display_name
+        now_h = time.time()
+        model_tel = get_all_model_telemetry()
+
+        def _mut_hb(cache: dict) -> dict:
+            hb_map = cache.setdefault("_bot_process_heartbeats", {})
+            hb_map[b_id_str] = {
+                "bot_id": client.user.id,
+                "bot_name": b_name,
+                "pid": os.getpid(),
+                "ws_latency_ms": ws_ms,
+                "timestamp": now_h,
+                "model_telemetry": model_tel,
+            }
+            return cache
+
+        try:
+            update_json_file(shared_image_cache_file, {}, _mut_hb)
+        except Exception:
+            pass
+
+    async def sync_bot_custom_status(active_channel_id: int = 0):
+        """
+        Crown Jewel #1 — Live Discord Custom Status & Activity Sync (`client.change_presence`):
+        Updates the bot's Discord sidebar status from its Subconscious `mood` or `active_topic`
+        (rate-limited to once per 180s, 0 extra API calls).
+        """
+        nonlocal last_status_sync_ts, last_synced_status_text
+        now_s = time.time()
+        if (now_s - last_status_sync_ts) < 180.0 or not client.user:
+            return
+        try:
+            scache = load_json_file(shared_image_cache_file, {})
+            ch_k = str(active_channel_id or 0)
+            b_state = scache.get("_bot_internal_state", {}).get(ch_k, {}).get(client.user.display_name, {})
+            r_state = scache.get("_room_state", {}).get(ch_k, {})
+            mood_s = str((b_state or {}).get("mood", "") or "").strip()
+            topic_s = str((r_state or {}).get("active_topic", "") or "").strip()
+            status_parts = [p for p in (mood_s, topic_s) if p]
+            if not status_parts:
+                return
+            new_status = " • ".join(status_parts)[:120]
+            if new_status and new_status != last_synced_status_text and hasattr(discord, "CustomActivity"):
+                last_status_sync_ts = now_s
+                last_synced_status_text = new_status
+                await client.change_presence(activity=discord.CustomActivity(name=new_status))
+        except Exception:
+            pass
+
+    async def trigger_welcome_greeting(member: discord.Member, target_channel, is_test: bool = False):
+        """Generates and sends an in-character server-join welcome message for `member`."""
+        if not target_channel or not client.user:
+            return
+        if not is_test:
+            stagger_sec = 1.2 + (((client.user.id >> 22) % 5) * 1.6)
+            await asyncio.sleep(stagger_sec)
+        try:
+            dyn_sys = copy.deepcopy(system_prompt)
+            welcome_prompt = (
+                f"A new member named **{member.display_name}** just joined the Discord server! "
+                f"Welcome **{member.display_name}** to the server in 1-2 short, punchy sentences strictly in your character voice as {client.user.display_name}. "
+                "Do NOT output any [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:] tags."
+            )
+            w_payload = {
+                "model": text_model,
+                "messages": [
+                    dyn_sys,
+                    {"role": "user", "content": welcome_prompt},
+                ],
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_tokens": 180,
+            }
+            w_res = await post_with_backoff(
+                api_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json_payload=w_payload,
+                timeout=(6, 18),
+                max_retries=2,
+                bot_name=client.user.display_name,
+            )
+            if w_res and w_res.status_code == 200:
+                w_reply = w_res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                _, w_reply = extract_and_strip_thought_tag(w_reply)
+                _, w_reply = extract_and_strip_voice_msg(w_reply)
+                w_reply = clean_and_compact_reply(w_reply)
+                if w_reply:
+                    sent_w = await target_channel.send(w_reply)
+                    upsert_chat_memory_entry(
+                        chat_memory_file,
+                        target_channel.id,
+                        {
+                            "role": "assistant",
+                            "content": w_reply,
+                            "author_id": client.user.id,
+                            "author_name": client.user.display_name,
+                            "message_id": sent_w.id if sent_w else f"welcome_{time.time()}",
+                            "author_is_bot": True,
+                        },
+                        max_history_length,
+                    )
+        except Exception as w_err:
+            print(f"[{client.user.display_name}] [WARN] Welcome greeter error: {w_err}")
 
     async def random_post_loop():
         await client.wait_until_ready()
@@ -226,6 +420,7 @@ def run_bot(
             await asyncio.sleep(60)
             try:
                 register_active_bot(shared_image_cache_file, client.user.id, client.user.display_name, keywords)
+                record_ipc_heartbeat()
 
                 conf_data = load_json_file(channel_config_file, {})
                 for ch_id_int, conf in conf_data.items():
@@ -287,16 +482,70 @@ def run_bot(
                         if active_loop_block:
                             dynamic_system["content"] += active_loop_block
 
+                        # Check _room_state for active live banter (skip interrupting) or Crown Jewel #5 open_hook
+                        scache_loop = load_json_file(shared_image_cache_file, {})
+                        room_st_loop = scache_loop.get("_room_state", {}).get(str(ch_id_int), {})
+                        if not isinstance(room_st_loop, dict):
+                            room_st_loop = {}
+                        if hist and isinstance(hist[-1].get("timestamp"), (int, float)):
+                            if (time.time() - float(hist[-1]["timestamp"])) < 75.0:
+                                # Channel is actively chatting right now; don't interrupt with an idle timer post
+                                continue
+
+                        open_hook_info = room_st_loop.get("open_hook")
+                        skit_target = None
+                        if isinstance(open_hook_info, dict) and open_hook_info.get("hook"):
+                            # Clear the open_hook atomically so it is only checked in on once!
+                            def _clear_open_hook(c_data, ck=str(ch_id_int)):
+                                r_m = c_data.get("_room_state", {}).get(ck, {})
+                                if isinstance(r_m, dict):
+                                    r_m.pop("open_hook", None)
+                                return c_data
+                            update_json_file(shared_image_cache_file, {}, _clear_open_hook)
+                            hook_speaker = open_hook_info.get("speaker", "a server member")
+                            hook_text = open_hook_info.get("hook", "")
+                            loop_directive_text = (
+                                f"System Directive (Proactive Check-In): Earlier in chat, **{hook_speaker}** mentioned: '{hook_text}'. "
+                                f"Naturally check in on **{hook_speaker}** or follow up on that topic in 1-2 short, in-character sentences! "
+                                "DO NOT output [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:]."
+                            )
+                        elif random.random() < 0.40:
+                            # Phase 2 — Autonomous Multi-Bot Mini-Interaction (40% of idle posts)
+                            skit_target = pick_fellow_bot_interaction_target(
+                                shared_image_cache_file,
+                                client.user.id,
+                                user_profiles=uprof_loop,
+                                persona_prompt=system_prompt.get("content", ""),
+                                guild_members=getattr(channel.guild, "members", None) if getattr(channel, "guild", None) else None,
+                            )
+                            if skit_target and skit_target.get("display_name"):
+                                t_bot_name = skit_target["display_name"]
+                                t_aff = skit_target.get("affinity", 0)
+                                rel_tone = "friendly ally/companion" if t_aff >= 15 else ("comedic rival/foil" if t_aff <= -8 else "fellow bot co-star")
+                                loop_directive_text = (
+                                    f"System Directive (Autonomous Inter-Bot Banter): Spontaneously address or tease your {rel_tone} **{t_bot_name}** by name "
+                                    f"in 1-2 short, punchy in-character sentences to spark a quick 2-turn interaction! "
+                                    "DO NOT output [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:]."
+                                )
+                            else:
+                                loop_directive_text = (
+                                    "System Directive: Spontaneously initiate conversation, share a random thought, or make a natural in-character observation "
+                                    "tied to the time of day or recent server vibe. Keep it to a single compact line or paragraph with no blank lines. "
+                                    "DO NOT output [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:]."
+                                )
+                        else:
+                            loop_directive_text = (
+                                "System Directive: Spontaneously initiate conversation, share a random thought, or make a natural in-character observation "
+                                "tied to the time of day or recent server vibe. Keep it to a single compact line or paragraph with no blank lines. "
+                                "DO NOT output [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:]."
+                            )
+
                         api_messages = build_api_messages_from_history(
                             dynamic_system, hist[-context_window:], client.user.id, client.user.display_name
                         )
                         api_messages.append({
                             "role": "system",
-                            "content": (
-                                "System Directive: Spontaneously initiate conversation, share a random thought, or make a natural in-character observation "
-                                "tied to the time of day or recent server vibe. Keep it to a single compact line or paragraph with no blank lines. "
-                                "DO NOT output [IMAGE_GEN:], [MEME_GEN:], [GIF:], or [VOICE_MSG:]."
-                            )
+                            "content": loop_directive_text
                         })
 
                         payload = {
@@ -320,6 +569,7 @@ def run_bot(
                         if res and res.status_code == 200:
                             reply = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                             if reply:
+                                _, reply = extract_and_strip_thought_tag(reply)
                                 _, reply = extract_and_strip_voice_msg(reply)
                                 reply = ERROR_REPLY_STRIP_REGEX.sub('', reply).strip()
                                 reply = LEARN_USER_STRIP_REGEX.sub('', reply).strip()
@@ -367,9 +617,27 @@ def run_bot(
 
     @client.event
     async def on_ready():
-        nonlocal random_loop_started, extracted_voice_role, extracted_voice_style
+        nonlocal random_loop_started, extracted_voice_role, extracted_voice_style, slash_tree_synced
         print(f"[STARTUP] Bot authenticated as {client.user.display_name} (ID: {client.user.id})")
         register_active_bot(shared_image_cache_file, client.user.id, client.user.display_name, keywords)
+        if hub_cmd_tree is not None and not slash_tree_synced:
+            slash_tree_synced = True
+            async def _sync_slash_bg():
+                try:
+                    # 1. Instant Guild-Level Sync (0-second propagation in all active servers!)
+                    for g in list(getattr(client, "guilds", [])):
+                        try:
+                            hub_cmd_tree.copy_global_to(guild=g)
+                            await hub_cmd_tree.sync(guild=g)
+                        except Exception as g_err:
+                            print(f"[{client.user.display_name}] [WARN] Guild slash sync warn ({getattr(g, 'name', g.id)}): {g_err}")
+                    # 2. Clear global commands so Discord never shows BOTH a global and guild duplicate of '/hub'!
+                    hub_cmd_tree.clear_commands(guild=None)
+                    await hub_cmd_tree.sync()
+                    print(f"[{client.user.display_name}] [SLASH] Synced single '/hub' slash command across {len(getattr(client, 'guilds', []))} server(s) (global duplicates cleared)!")
+                except Exception as s_err:
+                    print(f"[{client.user.display_name}] [WARN] Slash command sync skipped: {s_err}")
+            client.loop.create_task(_sync_slash_bg())
 
         auto_role, auto_style = extract_persona_voice_defaults(system_prompt.get("content", ""), client.user.display_name)
         if not extracted_voice_role:
@@ -460,7 +728,8 @@ def run_bot(
             enable_vision=enable_vision,
             enable_image_gen=enable_image_gen,
             enable_voice=enable_voice,
-            enable_gifs=enable_gifs
+            enable_gifs=enable_gifs,
+            welcome_test_callback=trigger_welcome_greeting,
         ):
             return
 
@@ -609,9 +878,24 @@ def run_bot(
         time_since_last_b2b = time.time() - conf.get("last_bot_to_bot", 0)
 
         has_media_candidate = is_visual_media_candidate(message)
+        has_voice_note_input = (not is_author_bot) and is_audio_voice_attachment(message)
+        voice_transcript_text = ""
+        if has_voice_note_input and not directed_at_other_bot:
+            audio_raw, audio_fname = await fetch_audio_bytes_from_message(message)
+            if audio_raw:
+                voice_transcript_text = await transcribe_voice_attachment(
+                    audio_raw, filename=audio_fname, api_key=api_key, bot_name=client.user.display_name
+                )
+                if voice_transcript_text:
+                    clean_content = (
+                        f"{clean_content}\n[Spoken Voice Note Transcript: '{voice_transcript_text}']".strip()
+                        if clean_content
+                        else f"[Spoken Voice Note Transcript: '{voice_transcript_text}']"
+                    )
+
         spontaneous_mult = compute_spontaneous_interest_multiplier(
             clean_content=clean_content,
-            has_media=has_media_candidate,
+            has_media=(has_media_candidate or bool(voice_transcript_text)),
             is_author_bot=is_author_bot,
             persona_prompt=system_prompt.get("content", ""),
             chat_history_list=chat_history_list,
@@ -686,7 +970,7 @@ def run_bot(
             if claimed_vision:
                 image_bytes = await fetch_image_bytes_from_message(message)
                 if image_bytes:
-                    image_desc = await summarize_image_for_memory(image_bytes, api_key, vision_model, api_url)
+                    image_desc = await summarize_image_for_memory(image_bytes, api_key, vision_model, api_url, shared_image_cache_file=shared_image_cache_file)
 
                 def _save_vision_desc(c):
                     if image_desc:
@@ -751,7 +1035,7 @@ def run_bot(
 
                         image_bytes = await fetch_image_bytes_from_message(prev_m)
                         if not prev_desc and image_bytes:
-                            prev_desc = await summarize_image_for_memory(image_bytes, api_key, vision_model, api_url)
+                            prev_desc = await summarize_image_for_memory(image_bytes, api_key, vision_model, api_url, shared_image_cache_file=shared_image_cache_file)
                             if prev_desc:
                                 def _save_prev_desc(c, pid=prev_m.id, pd=prev_desc):
                                     c[pid] = pd
@@ -912,12 +1196,30 @@ def run_bot(
                 channel_pending_waiters[channel_id] = channel_pending_waiters.get(channel_id, 0) + 1
                 is_queued_waiter = True
 
+            # Two-Wave Multi-Bot Coordination & Crowd Cap (3 responders max on 'hey bots', max 1 wait hop <= 2.2s)
+            wave_allowed, wave_slot = await claim_or_coordinate_turn_wave(
+                shared_image_cache_file=shared_image_cache_file,
+                message_id=message.id,
+                my_bot_id=client.user.id,
+                my_display_name=client.user.display_name,
+                clean_content=clean_content,
+            )
+            if not wave_allowed:
+                print(f"[{client.user.display_name}] [CROWD CAP] Skipping collective turn (3-bot responder cap reached).")
+                return
+
             async with ch_lock:
                 if is_queued_waiter:
                     channel_pending_waiters[channel_id] = max(0, channel_pending_waiters.get(channel_id, 1) - 1)
                 channel_in_coalesce_window[channel_id] = True
                 try:
-                    await asyncio.sleep(0.85)
+                    # Upgrade #8 — Velocity & Punctuation-Aware Adaptive Coalescing Window (0.12s vs 1.25s)
+                    coalesce_delay = (
+                        0.08
+                        if wave_slot >= 1
+                        else compute_adaptive_coalesce_delay(clean_content, is_author_bot=is_author_bot)
+                    )
+                    await asyncio.sleep(coalesce_delay)
                 finally:
                     channel_in_coalesce_window[channel_id] = False
 
@@ -996,11 +1298,19 @@ def run_bot(
                         coalesced_user_lines.reverse()
                         combined_recent_prompt = "\n".join(coalesced_user_lines) if coalesced_user_lines else clean_content
 
-                        # Only inject saved Server Lore or General Knowledge facts if they directly share
-                        # specific topic words with the current message/reply context (prevents out-of-context memory dumps!)
+                        # Load pre-computed semantic_tags from _room_state for Hybrid BM25 + Ebbinghaus RAG (#4)
+                        scache_turn = load_json_file(shared_image_cache_file, {})
+                        room_sem_tags = (
+                            scache_turn.get("_room_state", {}).get(str(channel_id), {}).get("semantic_tags", [])
+                            if isinstance(scache_turn.get("_room_state", {}).get(str(channel_id)), dict)
+                            else []
+                        )
                         active_topic_query = f"{combined_recent_prompt} {reply_context_str}".strip()
                         relevant_ltm = select_relevant_memories(
-                            load_json_file(long_term_memory_file, []), active_topic_query, max_items=5
+                            load_json_file(long_term_memory_file, []),
+                            active_topic_query,
+                            max_items=5,
+                            semantic_tags=room_sem_tags,
                         )
                         if relevant_ltm:
                             dynamic_system["content"] += (
@@ -1009,7 +1319,10 @@ def run_bot(
                             )
 
                         relevant_gen = select_relevant_memories(
-                            load_json_file(general_memory_file, []), active_topic_query, max_items=5
+                            load_json_file(general_memory_file, []),
+                            active_topic_query,
+                            max_items=5,
+                            semantic_tags=room_sem_tags,
                         )
                         if relevant_gen:
                             dynamic_system["content"] += (
@@ -1035,7 +1348,9 @@ def run_bot(
                             is_spontaneous=(not is_relevant_trigger),
                             persona_prompt=system_prompt.get("content", ""),
                             other_bot_names=other_bot_display_list,
-                            my_bot_name=client.user.display_name
+                            my_bot_name=client.user.display_name,
+                            shared_cache_file=shared_image_cache_file,
+                            channel_id=channel_id,
                         )
                         if active_user_block:
                             dynamic_system["content"] += active_user_block
@@ -1078,6 +1393,19 @@ def run_bot(
                                 )
                             })
 
+                        # Phase 3 — Image-to-Image Style Remixing Detection
+                        remix_source_desc = image_desc
+                        if not remix_source_desc and reply_context_str:
+                            ref_desc_m = IMAGE_DESC_EXTRACT_REGEX.search(reply_context_str)
+                            if ref_desc_m:
+                                remix_source_desc = f"[Attached Media Description: {ref_desc_m.group(1).strip()}]"
+
+                        is_image_remix_req = bool(
+                            ch_enable_image_gen
+                            and not directed_at_other_bot
+                            and remix_source_desc
+                            and IMAGE_REMIX_REQ_REGEX.search(combined_recent_prompt or "")
+                        )
                         is_explicit_meme_req = bool(
                             ch_enable_image_gen
                             and not directed_at_other_bot
@@ -1087,12 +1415,12 @@ def run_bot(
                             ch_enable_image_gen
                             and not is_explicit_meme_req
                             and not directed_at_other_bot
-                            and EXPLICIT_IMAGE_REQ_REGEX.search(combined_recent_prompt)
+                            and (EXPLICIT_IMAGE_REQ_REGEX.search(combined_recent_prompt) or is_image_remix_req)
                         )
                         is_explicit_voice_req = bool(
                             ch_enable_voice
                             and not directed_at_other_bot
-                            and EXPLICIT_VOICE_REQ_REGEX.search(combined_recent_prompt)
+                            and (EXPLICIT_VOICE_REQ_REGEX.search(combined_recent_prompt) or bool(voice_transcript_text))
                         )
                         is_explicit_gif_req = bool(
                             ch_enable_gifs
@@ -1117,6 +1445,15 @@ def run_bot(
                                     "System Directive: The user is asking you to generate a meme! "
                                     "You MUST append `[MEME_GEN: vivid visual description of the scene without text | <witty setup line> | <witty punchline>]` at the end of your response. "
                                     "Both captions MUST be real, original joke lines tied to the topic (NEVER write literal words like 'TOP CAPTION' or 'ABSOLUTELY UNACCEPTABLE'). Do NOT output `[GIF:]` or `[IMAGE_GEN:]` in the same message."
+                                )
+                            })
+                        elif is_image_remix_req:
+                            api_messages.append({
+                                "role": "system",
+                                "content": (
+                                    f"System Directive (Image-to-Image Remix): The user is asking you to remix/redraw the attached or replied-to visual ({remix_source_desc})! "
+                                    "You MUST append `[IMAGE_GEN: detailed 30-50 word visual description]` at the end of your response that preserves the core subject/composition of the source image while applying the user's requested style, twist, or modification. "
+                                    "Do NOT output `[GIF:]` in the same message."
                                 )
                             })
                         elif is_explicit_img_req:
@@ -1154,6 +1491,11 @@ def run_bot(
                                 )
                             })
 
+                        # Inject 0ms Deterministic AST Math / Unit / Python Syntax Grounding Tools
+                        grounding_note = evaluate_deterministic_grounding_tools(combined_recent_prompt)
+                        if grounding_note:
+                            api_messages.append({"role": "system", "content": grounding_note})
+
                         text_only_messages = copy.deepcopy(api_messages)
 
                         if image_bytes and ch_enable_vision:
@@ -1172,11 +1514,19 @@ def run_bot(
                                     ]
                                     break
 
+                        # Upgrade #12 — Situational Sampling Modulation (Tech=0.45/0.85, Banter=0.85/0.92, Standard=base)
+                        turn_temp, turn_top_p = compute_situational_sampling_params(
+                            combined_recent_prompt,
+                            base_temp=current_temp,
+                            base_top_p=top_p,
+                            is_meme_or_roast=is_explicit_meme_req,
+                        )
+
                         payload = {
                             "model": active_model,
                             "messages": api_messages,
-                            "temperature": current_temp,
-                            "top_p": top_p,
+                            "temperature": turn_temp,
+                            "top_p": turn_top_p,
                             "frequency_penalty": 0.42,
                             "presence_penalty": 0.30,
                             "max_tokens": output_length
@@ -1187,7 +1537,7 @@ def run_bot(
                         res = None
                         if primary_circuit_open:
                             turn_glitch_tracker.append(f"circuit breaker open on {active_model}")
-                            print(f"[{client.user.display_name}] [CIRCUIT BREAKER] Fast-failing over from '{active_model}' to backup model...")
+                            print(f"[{client.user.display_name}] [CIRCUIT BREAKER] Fast-failing over from '{active_model}' to EWMA-ranked backup model...")
                         else:
                             res = await post_with_backoff(
                                 api_url,
@@ -1202,6 +1552,7 @@ def run_bot(
 
                         reply = ""
                         raw_reply = ""
+                        bot_thought_text = None
                         intentional_silence = False
                         if res is not None and res.status_code == 200:
                             raw_reply = res.json().get("choices", [{}])[0].get("message", {}).get("content", "") or ""
@@ -1210,6 +1561,7 @@ def run_bot(
                             reply = ERROR_REPLY_STRIP_REGEX.sub('', raw_reply).strip()
 
                         if intentional_silence:
+                            mark_turn_wave_complete(shared_image_cache_file, message.id, client.user.id)
                             print(f"[{client.user.display_name}] [INFO] Model chose intentional silence on non-explicit turn; skipping reply.")
                             return
 
@@ -1220,7 +1572,7 @@ def run_bot(
                         )
 
                         if should_try_fallback and image_bytes and ch_enable_vision:
-                            for fb_v_model in FALLBACK_VISION_MODELS:
+                            for fb_v_model in rank_models_by_ewma_latency(FALLBACK_VISION_MODELS, endpoint_label):
                                 if fb_v_model == active_model:
                                     continue
                                 print(f"[{client.user.display_name}] [VISION FALLBACK] Trying '{fb_v_model}'...")
@@ -1252,7 +1604,7 @@ def run_bot(
                                         break
 
                         if not reply and should_try_fallback:
-                            for fb_model in FALLBACK_TEXT_MODELS:
+                            for fb_model in rank_models_by_ewma_latency(FALLBACK_TEXT_MODELS, endpoint_label):
                                 if fb_model == active_model:
                                     continue
                                 print(f"[{client.user.display_name}] [TEXT FALLBACK] Trying '{fb_model}'...")
@@ -1291,6 +1643,7 @@ def run_bot(
                             else:
                                 final_reply = "*(System: DeepInfra dropped the text request after multiple retries.)*"
                         else:
+                            bot_thought_text, reply = extract_and_strip_thought_tag(reply)
                             raw_voice_content, reply = extract_and_strip_voice_msg(reply)
                             if directed_at_other_bot:
                                 raw_voice_content = None
@@ -1479,14 +1832,14 @@ def run_bot(
                                         and bot_promised_visual_in_text
                                     )
                                 ):
-                                    print(f"[{client.user.display_name}] [INFO] Synthesizing missing [IMAGE_GEN:] prompt for explicit image request...")
+                                    print(f"[{client.user.display_name}] [INFO] Synthesizing missing [IMAGE_GEN:] prompt for explicit image/remix request...")
                                     img_prompt = await synthesize_missing_image_prompt(
-                                        reply, combined_recent_prompt, gen_records, client.user.display_name, persona_summary, api_key, text_model, api_url, raw_history=raw_history
+                                        reply, combined_recent_prompt, gen_records, client.user.display_name, persona_summary, api_key, text_model, api_url, raw_history=raw_history, source_image_desc=remix_source_desc
                                     )
 
                                 if img_prompt:
                                     img_prompt = await ensure_unique_image_prompt(
-                                        img_prompt, gen_records, raw_history, client.user.display_name, persona_summary, combined_recent_prompt, api_key, text_model, api_url, reply_text=reply
+                                        img_prompt, gen_records, raw_history, client.user.display_name, persona_summary, combined_recent_prompt, api_key, text_model, api_url, reply_text=reply, source_image_desc=remix_source_desc
                                     )
                                     if was_meme_intent or meme_top_text or meme_bottom_text:
                                         meme_top_text, meme_bottom_text = await ensure_unique_meme_captions(
@@ -1607,29 +1960,57 @@ def run_bot(
                 else:
                     files_to_send = []
                     is_meme_output = bool(meme_top_text.strip() or meme_bottom_text.strip())
+                    media_view = None
                     if image_file:
                         fname = "generated_meme.png" if is_meme_output else "generated_image.png"
                         files_to_send.append(discord.File(fp=image_file, filename=fname))
+                        if img_prompt:
+                            media_view = create_generated_media_view(
+                                img_prompt=img_prompt,
+                                meme_top_text=meme_top_text,
+                                meme_bottom_text=meme_bottom_text,
+                                image_gen_model=image_gen_model,
+                                api_key=api_key,
+                                bot_id=client.user.id,
+                                bot_name=client.user.display_name,
+                                channel_id=channel_id,
+                                trigger_msg_id=message.id,
+                                shared_image_cache_file=shared_image_cache_file,
+                            )
                     if voice_file:
                         files_to_send.append(discord.File(fp=voice_file, filename="voice_message.mp3"))
 
                     sent_msg = None
+                    send_kwargs = {" view": media_view} if media_view is not None else {}
                     try:
                         if final_gif:
-                            sent_msg = await message.channel.send(
-                                content=f"{final_reply}\n{final_gif}" if final_reply else final_gif,
-                                files=files_to_send
-                            )
+                            if media_view is not None:
+                                sent_msg = await message.channel.send(
+                                    content=f"{final_reply}\n{final_gif}" if final_reply else final_gif,
+                                    files=files_to_send,
+                                    view=media_view,
+                                )
+                            else:
+                                sent_msg = await message.channel.send(
+                                    content=f"{final_reply}\n{final_gif}" if final_reply else final_gif,
+                                    files=files_to_send,
+                                )
                         else:
                             chunks = [final_reply[i:i + 1900] for i in range(0, len(final_reply), 1900)] if final_reply else []
                             if chunks:
                                 for i, chunk in enumerate(chunks):
                                     if i == len(chunks) - 1:
-                                        sent_msg = await message.channel.send(chunk.strip(), files=files_to_send)
+                                        if media_view is not None:
+                                            sent_msg = await message.channel.send(chunk.strip(), files=files_to_send, view=media_view)
+                                        else:
+                                            sent_msg = await message.channel.send(chunk.strip(), files=files_to_send)
                                     elif chunk.strip():
                                         sent_msg = await message.channel.send(chunk.strip())
                             elif files_to_send:
-                                sent_msg = await message.channel.send(files=files_to_send)
+                                if media_view is not None:
+                                    sent_msg = await message.channel.send(files=files_to_send, view=media_view)
+                                else:
+                                    sent_msg = await message.channel.send(files=files_to_send)
                     except discord.errors.HTTPException as e:
                         print(f"[{client.user.display_name}] [ERROR] Discord upload failed: {e}")
                         image_file = None
@@ -1765,6 +2146,39 @@ def run_bot(
                             max_history_length
                         )
 
+                    # Signal Wave 1 completion so any Wave 2 Co-Star bots wake up immediately!
+                    mark_turn_wave_complete(shared_image_cache_file, message.id, client.user.id)
+
+                    # Phase 1B — Non-Blocking Unified Subconscious Cognitive Engine (0ms typing latency impact!)
+                    if not is_error_reply and clean_mem_reply:
+                        async def _bg_subconscious_wrapper():
+                            try:
+                                await asyncio.sleep(0.10)
+                                await run_subconscious_cognitive_turn(
+                                    channel_id=channel_id,
+                                    trigger_message_id=message.id,
+                                    speaker_name=message.author.display_name,
+                                    user_message=combined_recent_prompt,
+                                    bot_reply_text=clean_mem_reply,
+                                    bot_thought_text=bot_thought_text,
+                                    my_bot_name=client.user.display_name,
+                                    is_speaker_bot=is_author_bot,
+                                    raw_history=raw_history,
+                                    user_profiles_file=user_profiles_file,
+                                    long_term_memory_file=long_term_memory_file,
+                                    general_knowledge_file=general_memory_file,
+                                    shared_cache_file=shared_image_cache_file,
+                                    other_bot_names=other_bot_display_list,
+                                    api_key=api_key,
+                                    api_url=api_url,
+                                )
+                                record_ipc_heartbeat()
+                                await sync_bot_custom_status(channel_id)
+                            except Exception as sub_e:
+                                print(f"[{client.user.display_name}] [SUBCONSCIOUS WARN] {sub_e}")
+
+                        asyncio.create_task(_bg_subconscious_wrapper())
+
                     if react_task:
                         try:
                             reacted_emoji = await react_task
@@ -1772,15 +2186,90 @@ def run_bot(
                             pass
 
                     if reacted_emoji:
-                        upsert_chat_memory_entry(
-                            chat_memory_file,
-                            channel_id,
-                            {
-                                "role": "system",
-                                "content": f"System Note: {client.user.display_name} silently reacted to {message.author.display_name}'s message with {reacted_emoji}. Do not announce this in your text.",
-                                "message_id": f"react_{message.id}_{client.user.id}"
-                            },
-                            max_history_length
+                        update_message_reaction_ledger(
+                            chat_memory_file=chat_memory_file,
+                            user_profiles_file=user_profiles_file,
+                            channel_id=channel_id,
+                            message_id=message.id,
+                            emoji_str=str(reacted_emoji),
+                            reactor_name=client.user.display_name,
+                            is_add=True,
+                            reactor_is_bot=True,
+                            my_bot_name=client.user.display_name,
                         )
+        elif react_task:
+            # Even when the bot did not send a text reply, record its silent emoji reaction in the In-Place Reaction Ledger!
+            try:
+                reacted_emoji = await react_task
+                if reacted_emoji:
+                    update_message_reaction_ledger(
+                        chat_memory_file=chat_memory_file,
+                        user_profiles_file=user_profiles_file,
+                        channel_id=channel_id,
+                        message_id=message.id,
+                        emoji_str=str(reacted_emoji),
+                        reactor_name=client.user.display_name,
+                        is_add=True,
+                        reactor_is_bot=True,
+                        my_bot_name=client.user.display_name,
+                    )
+            except Exception:
+                pass
+
+    @client.event
+    async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+        if not client.user or payload.user_id == client.user.id:
+            return
+        guild = client.get_guild(payload.guild_id) if getattr(payload, "guild_id", None) else None
+        member = payload.member or (guild.get_member(payload.user_id) if guild else None)
+        if not member:
+            return
+        emoji_str = str(payload.emoji)
+        update_message_reaction_ledger(
+            chat_memory_file=chat_memory_file,
+            user_profiles_file=user_profiles_file,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+            emoji_str=emoji_str,
+            reactor_name=member.display_name,
+            is_add=True,
+            reactor_is_bot=bool(getattr(member, "bot", False)),
+            my_bot_name=client.user.display_name,
+        )
+
+    @client.event
+    async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+        if not client.user or payload.user_id == client.user.id:
+            return
+        guild = client.get_guild(payload.guild_id) if getattr(payload, "guild_id", None) else None
+        member = guild.get_member(payload.user_id) if guild else None
+        if not member:
+            return
+        emoji_str = str(payload.emoji)
+        update_message_reaction_ledger(
+            chat_memory_file=chat_memory_file,
+            user_profiles_file=user_profiles_file,
+            channel_id=payload.channel_id,
+            message_id=payload.message_id,
+            emoji_str=emoji_str,
+            reactor_name=member.display_name,
+            is_add=False,
+            reactor_is_bot=bool(getattr(member, "bot", False)),
+            my_bot_name=client.user.display_name,
+        )
+
+    @client.event
+    async def on_member_join(member: discord.Member):
+        if getattr(member, "bot", False) or not getattr(member, "guild", None):
+            return
+        conf_all = load_json_file(channel_config_file, {})
+        g_key = f"guild_welcome_{member.guild.id}"
+        g_conf = conf_all.get(g_key, {})
+        if not isinstance(g_conf, dict) or not g_conf.get("enabled", False):
+            return
+        target_ch_id = g_conf.get("channel_id")
+        target_ch = client.get_channel(int(target_ch_id)) if target_ch_id else member.guild.system_channel
+        if target_ch:
+            await trigger_welcome_greeting(member, target_ch, is_test=False)
 
     client.run(token)

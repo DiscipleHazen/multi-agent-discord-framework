@@ -19,13 +19,19 @@ _JSON_MEM_CACHE = {}  # {abs_path: (mtime_ns, file_size, data_copy, serialized_s
 _MAX_MEM_CACHE_FILES = 64
 
 _CIRCUIT_LOCK = threading.RLock()
-_MODEL_CIRCUIT_STATE = {}  # {model_key: {"failures": int, "open_until": float}}
+_MODEL_CIRCUIT_STATE = {}     # {model_key: {"failures": int, "open_until": float}}
+_MODEL_TELEMETRY_STATE = {}   # {model_key: {"ewma_latency": float, "ewma_err": float, "calls": int, "failures": int, "prompt_tokens": int, "completion_tokens": int}}
 _CIRCUIT_FAILURE_THRESHOLD = 2
 _CIRCUIT_COOLDOWN_SECONDS = 45.0
+_EWMA_LATENCY_ALPHA = 0.30
+_EWMA_ERROR_BETA = 0.25
 
 RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 520, 522, 524})
 SOCKET_RESET_STATUSES = frozenset({502, 503, 504, 520, 522, 524})
-_CHANNEL_KEYED_SUBDICTS = frozenset({"_active_followup_bot", "_last_unprompted_chime", "_last_bot_to_bot_turn"})
+_CHANNEL_KEYED_SUBDICTS = frozenset({
+    "_active_followup_bot", "_last_unprompted_chime", "_last_bot_to_bot_turn",
+    "_room_state", "_bot_internal_state", "_hawkes_arrivals"
+})
 
 
 def sanitize_url(url: str) -> str:
@@ -94,19 +100,124 @@ def is_model_circuit_open(model_key: str) -> bool:
         return False
 
 
-def record_model_outcome(model_key: str, success: bool):
-    """Updates the adaptive circuit-breaker state for `model_key` after an HTTP attempt."""
+def record_model_outcome(
+    model_key: str,
+    success: bool,
+    elapsed_sec: float | None = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0
+):
+    """
+    Updates both the adaptive circuit-breaker state and the EWMA latency / error-rate
+    telemetry ledger for `model_key` after an HTTP attempt.
+    """
     if not model_key:
         return
     now_m = time.monotonic()
     with _CIRCUIT_LOCK:
+        tel = _MODEL_TELEMETRY_STATE.setdefault(model_key, {
+            "ewma_latency": 2.2,
+            "ewma_err": 0.0,
+            "calls": 0,
+            "failures": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0
+        })
+        tel["calls"] = tel.get("calls", 0) + 1
+        if elapsed_sec is not None and elapsed_sec >= 0.0:
+            prev_lat = float(tel.get("ewma_latency", elapsed_sec))
+            tel["ewma_latency"] = (
+                float(elapsed_sec)
+                if tel["calls"] == 1
+                else (_EWMA_LATENCY_ALPHA * float(elapsed_sec) + (1.0 - _EWMA_LATENCY_ALPHA) * prev_lat)
+            )
+        err_sample = 0.0 if success else 1.0
+        tel["ewma_err"] = _EWMA_ERROR_BETA * err_sample + (1.0 - _EWMA_ERROR_BETA) * float(tel.get("ewma_err", 0.0))
+        if prompt_tokens > 0:
+            tel["prompt_tokens"] = tel.get("prompt_tokens", 0) + int(prompt_tokens)
+        if completion_tokens > 0:
+            tel["completion_tokens"] = tel.get("completion_tokens", 0) + int(completion_tokens)
+
         if success:
             _MODEL_CIRCUIT_STATE.pop(model_key, None)
             return
+        tel["failures"] = tel.get("failures", 0) + 1
         st = _MODEL_CIRCUIT_STATE.setdefault(model_key, {"failures": 0, "open_until": 0.0})
         st["failures"] = st.get("failures", 0) + 1
         if st["failures"] >= _CIRCUIT_FAILURE_THRESHOLD:
             st["open_until"] = now_m + _CIRCUIT_COOLDOWN_SECONDS
+
+
+def get_model_effective_latency(model_key: str, default_latency: float = 2.5) -> float:
+    """
+    Computes the effective EWMA latency score `L_t / max(0.10, 1 - P_err)` for `model_key`,
+    adding a +50s penalty if the model's circuit breaker is currently open.
+    """
+    if not model_key:
+        return default_latency
+    with _CIRCUIT_LOCK:
+        tel = _MODEL_TELEMETRY_STATE.get(model_key)
+        base_lat = float(tel["ewma_latency"]) if tel else default_latency
+        err_rate = float(tel["ewma_err"]) if tel else 0.0
+    eff = base_lat / max(0.10, 1.0 - err_rate)
+    if is_model_circuit_open(model_key):
+        eff += 50.0
+    return eff
+
+
+def rank_models_by_ewma_latency(models: list[str], endpoint_label: str = "completions") -> list[str]:
+    """
+    Sorts a list of candidate model identifiers by lowest effective EWMA latency
+    (`L_t / (1 - P_err)`), preserving original list order as a tie-breaker when no
+    telemetry has been recorded yet.
+    """
+    if not models or len(models) <= 1:
+        return list(models or [])
+
+    def _sort_key(idx_and_model: tuple[int, str]) -> tuple[float, int]:
+        idx, m_name = idx_and_model
+        ckey = f"{endpoint_label}:{m_name}" if endpoint_label else m_name
+        with _CIRCUIT_LOCK:
+            has_data = ckey in _MODEL_TELEMETRY_STATE or ckey in _MODEL_CIRCUIT_STATE
+        if not has_data:
+            return (2.5 + idx * 0.01, idx)
+        return (round(get_model_effective_latency(ckey), 3), idx)
+
+    ranked = sorted(enumerate(models), key=_sort_key)
+    return [m for _, m in ranked]
+
+
+def get_all_model_telemetry() -> dict[str, dict]:
+    """
+    Returns a thread-safe snapshot of all model EWMA latencies, error rates, token
+    counters, and circuit-breaker states (`CLOSED`, `HALF-OPEN`, `OPEN`) for the
+    Orchestrator and Web-UI Control Plane.
+    """
+    now_m = time.monotonic()
+    snapshot = {}
+    with _CIRCUIT_LOCK:
+        all_keys = set(_MODEL_TELEMETRY_STATE.keys()) | set(_MODEL_CIRCUIT_STATE.keys())
+        for k in sorted(all_keys):
+            tel = _MODEL_TELEMETRY_STATE.get(k, {})
+            st = _MODEL_CIRCUIT_STATE.get(k, {})
+            open_until = float(st.get("open_until", 0.0) or 0.0)
+            failures = int(st.get("failures", 0) or 0)
+            if now_m < open_until:
+                circuit_status = "OPEN"
+            elif failures > 0:
+                circuit_status = "HALF-OPEN"
+            else:
+                circuit_status = "CLOSED"
+            snapshot[k] = {
+                "ewma_latency_sec": round(float(tel.get("ewma_latency", 0.0)), 3),
+                "ewma_error_rate": round(float(tel.get("ewma_err", 0.0)), 3),
+                "calls": int(tel.get("calls", 0)),
+                "failures": int(tel.get("failures", 0)),
+                "prompt_tokens": int(tel.get("prompt_tokens", 0)),
+                "completion_tokens": int(tel.get("completion_tokens", 0)),
+                "circuit_status": circuit_status
+            }
+    return snapshot
 
 
 async def post_with_backoff(
@@ -159,6 +270,7 @@ async def post_with_backoff(
                 }]
                 injected_retry_note = True
 
+        req_start_m = time.monotonic()
         try:
             should_reset = reset_next
             reset_next = False
@@ -167,31 +279,42 @@ async def post_with_backoff(
                     clean_url, headers=headers, json=p, timeout=t
                 )
             )
+            req_elapsed = max(0.001, time.monotonic() - req_start_m)
             last_res = res
             if res.status_code == 200:
                 if not res.content:
                     reset_next = True
-                    record_model_outcome(circuit_key, success=False)
+                    record_model_outcome(circuit_key, success=False, elapsed_sec=req_elapsed)
                     if glitch_tracker is not None:
                         glitch_tracker.append(f"empty HTTP 200 payload on attempt {attempt + 1}")
                     print(f"[{bot_name}] [WARN] Empty HTTP 200 body from {endpoint_label}; retrying ({attempt + 1}/{effective_retries})...")
                     await asyncio.sleep(1.2 * (attempt + 1) + random.uniform(0.08, 0.3))
                     continue
 
+                p_toks = 0
+                c_toks = 0
                 ctype = res.headers.get("Content-Type", "").lower()
                 if "application/json" in ctype:
                     try:
-                        res.json()
+                        parsed_json = res.json()
+                        if isinstance(parsed_json, dict):
+                            usage_d = parsed_json.get("usage")
+                            if isinstance(usage_d, dict):
+                                p_toks = int(usage_d.get("prompt_tokens", 0) or 0)
+                                c_toks = int(usage_d.get("completion_tokens", 0) or 0)
                     except Exception:
                         reset_next = True
-                        record_model_outcome(circuit_key, success=False)
+                        record_model_outcome(circuit_key, success=False, elapsed_sec=req_elapsed)
                         if glitch_tracker is not None:
                             glitch_tracker.append(f"truncated JSON on attempt {attempt + 1}")
                         print(f"[{bot_name}] [WARN] Truncated/corrupt JSON in HTTP 200 from {endpoint_label}; retrying ({attempt + 1}/{effective_retries})...")
                         await asyncio.sleep(1.2 * (attempt + 1) + random.uniform(0.08, 0.3))
                         continue
 
-                record_model_outcome(circuit_key, success=True)
+                record_model_outcome(
+                    circuit_key, success=True, elapsed_sec=req_elapsed,
+                    prompt_tokens=p_toks, completion_tokens=c_toks
+                )
                 return res
 
             if res.status_code in RETRYABLE_HTTP_STATUSES:
@@ -199,7 +322,7 @@ async def post_with_backoff(
                     glitch_tracker.append(f"HTTP {res.status_code} on attempt {attempt + 1}")
                 if res.status_code in SOCKET_RESET_STATUSES:
                     reset_next = True
-                    record_model_outcome(circuit_key, success=False)
+                    record_model_outcome(circuit_key, success=False, elapsed_sec=req_elapsed)
                 if attempt + 1 >= effective_retries:
                     break
                 retry_after = res.headers.get("Retry-After")
@@ -222,16 +345,18 @@ async def post_with_backoff(
                     glitch_tracker.append(f"HTTP {res.status_code}")
                 return res
         except requests.exceptions.Timeout:
+            req_elapsed = max(0.001, time.monotonic() - req_start_m)
             reset_next = True
-            record_model_outcome(circuit_key, success=False)
+            record_model_outcome(circuit_key, success=False, elapsed_sec=req_elapsed)
             if glitch_tracker is not None:
                 glitch_tracker.append(f"API timeout on attempt {attempt + 1}")
             print(f"[{bot_name}] [TIMEOUT] Request to {endpoint_label} timed out ({attempt + 1}/{effective_retries}).")
             if attempt + 1 < effective_retries:
                 await asyncio.sleep(1.3 * (attempt + 1) + random.uniform(0.05, 0.25))
         except Exception as e:
+            req_elapsed = max(0.001, time.monotonic() - req_start_m)
             reset_next = True
-            record_model_outcome(circuit_key, success=False)
+            record_model_outcome(circuit_key, success=False, elapsed_sec=req_elapsed)
             if glitch_tracker is not None:
                 glitch_tracker.append(f"network drop on attempt {attempt + 1}")
             print(f"[{bot_name}] [NETWORK ERROR] {e} ({attempt + 1}/{effective_retries}).")

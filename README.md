@@ -1,202 +1,209 @@
-# Multi-Agent Discord AI Ecosystem
-
+Multi-Agent Discord AI Ecosystem
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Discord.py](https://img.shields.io/badge/Discord.py-Asynchronous-5865F2?style=for-the-badge&logo=discord&logoColor=white)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Video_Vision-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)
 ![Pillow](https://img.shields.io/badge/Pillow-Meme_Engine-3776AB?style=for-the-badge)
 ![DeepInfra](https://img.shields.io/badge/DeepInfra-Multimodal_AI-000000?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
-
-A distributed multi-agent Discord bot framework written in Python. Engineered to run multiple autonomous, distinct AI agents concurrently within the same Discord channels, this system features cross-process atomic state synchronization with OS-level dead-PID lock recovery, an IDF-weighted 3-tier memory verification pipeline, multimodal computer vision (including motion-aware 2x2 video/GIF keyframe storyboards with Laplacian sharpness scoring), luminance-adaptive meme typography, and director-mode neural Text-to-Speech (TTS). (This was made with the help of Gemini Pro/Argon)
-
+A distributed multi-agent Discord AI framework and SRE process control plane written in Python. Engineered to run 4 to 50+ autonomous, distinct AI personas concurrently within the same Discord channels, this system features an OS-level process supervisor and real-time Server-Sent Events (SSE) Web-UI dashboard, a two-phase Conscious/Subconscious cognitive architecture, Okapi BM25 + Ebbinghaus exponential decay RAG, Heider structural balance social graph dynamics, two-wave multi-agent turn coordination, 64-bit perceptual dHash computer vision with Shannon-entropy/action-flux 2x2 video storyboards, Laplacian edge-energy meme typography, and bidirectional voice (OpenAI Whisper STT + MiMo-V2.5-TTS Director Mode).
+(This was made with the major help of Gemini Argon)
 ---
-
-## Key Engineering Highlights
-
-* **Cross-Process Concurrency, Dead-PID Lock Recovery & Adaptive Circuit Breakers (`core_system.py`, `main_bot.py`):**
-  * **OS-Agnostic Atomic File Locking:** Built a cross-process synchronization engine (`FileLock`) using atomic `O_CREAT | O_EXCL` lockfiles, monotonic timeout tracking, and atomic `.tmp` file replacement (`os.replace`). Inspects lockfile `<pid>|<timestamp>` headers against the OS process table (`OpenProcess`/`GetExitCodeProcess` on Windows; `os.kill(pid, 0)` on POSIX) to evict locks held by terminated processes in `0ms`.
-  * **Zero-Copy Serialization & Nanosecond RAM Cache:** Enables independent bot processes to read and mutate shared JSON state (`chat_memory.json`, `shared_image_cache.json`, `general_knowledge.json`) concurrently without race conditions. Backed by a thread-safe (`threading.RLock`) `(st_mtime_ns, st_size)` cache that stores pre-serialized JSON payloads to eliminate redundant `copy.deepcopy` calls and skip no-op disk writes, paired with non-blocking `asyncio.to_thread` I/O wrappers.
-  * **Two-Phase Turn Coalescing & Bounded Waiter Queue:** Separates pre-snapshot message coalescing windows (`channel_in_coalesce_window`) from in-flight API generation locks (`channel_pending_waiters`) and watermark tracking (`max_hist_msg_id`), ensuring rapid multi-line user bursts coalesce into a single turn while mid-flight `@mentions` queue cleanly without dropping or double-posting.
-  * **Per-Model Adaptive Circuit Breaker & HTTP Pooling:** Maintains thread-local `requests.Session` connection pools (`HTTPAdapter`) with automated socket resets and truncated-JSON payload validation. Tracks consecutive gateway failures (`502`, `503`, `504`, `522`, `524`, timeouts) per `(endpoint, model)` pair to trip fast-fail cooldown windows that route directly to backup models without stalling the event loop.
-* **Multi-Agent Discovery, Target Attribution & Turn Coordination (`bot_discovery.py`):**
-  * **Low-I/O Service Discovery:** Active agents dynamically register their display names, aliases, and trigger keywords into a shared cross-process registry that throttles unchanged heartbeat writes to 30-minute intervals (eliminating 97% of idle disk I/O).
-  * **Speaker-to-Target Disambiguation:** Resolves multi-agent conversation collisions by parsing sentence structure, prepositions, and Discord reply trees to annotate shared chat logs (`[User (speaking to Agent_A, NOT to Agent_B)]: ...`), preventing agents from hijacking commands or misattributing questions directed at other bots.
-  * **4-Stage Contextual Follow-Up Engine:** Combines `O(1)` persistent tombstone and turn-cap checks (`max_followup_turns = 2` with active speaker tracking, Stage 0), deterministic addressing, AFK/stepping-away, dismissal closure, and third-person side-comment filters (Stage 1), stem-aware lexical/visual overlap and clarification fast-paths (Stage 2), and a zero-temperature 10-token LLM classifier (Stage 3) with atomic per-message claim locks (`_claimed_followup_msgs`).
-  * **Cross-Bot Floor Yielding & Dogpile Prevention:** Scales spontaneous engagement multipliers using media cues, open questions, and persona stem alignment while enforcing cross-bot active-exchange yielding (`is_other_bot_in_active_exchange`) and atomic channel-wide cooldown slots (`_last_unprompted_chime`) so unprompted agents never interrupt another bot's active 1-on-1 exchange.
-* **IDF-Weighted Memory Retrieval, Hearsay Verification & Loop Prevention (`memory_and_context.py`, `text_and_parsers.py`):**
-  * **3-Tier Knowledge Architecture & Superseding Consolidation:** Separates persistent memory into **Per-User Dossiers** (`[LEARN_USER: user | fact]`), **Shared Universal Knowledge** (`[LEARN_GENERAL: fact]`), and **Server-Specific Lore** (`[LEARN: fact]`). Automatically consolidates overlapping facts in-place (`consolidate_and_append_fact`) when more detailed information is learned, and self-heals memory files on startup by pruning ephemeral chat recaps.
-  * **IDF-Weighted Specificity Gate:** Scores stored memories against active conversation stems by weighting high-specificity domain and proper nouns (`2.5x`) against a 120+ word low-information conversational lexicon (`0.25x`), requiring a specificity threshold `>= 2.0` before injecting passive memories into the system prompt.
-  * **Zero-Latency First-Person Fast-Path & LLM Hearsay Verifier:** Validates unambiguous first-person self-disclosures in `0ms` with zero extra API calls while routing ambiguous or multi-user attributions through an asynchronous zero-temperature LLM verifier that blocks third-party reported speech (*"he said..."*, *"they told me..."*) and temporary chat actions.
-  * **Temporal Session Boundaries & Anti-Repetition Engine:** Tracks message creation timestamps to inject `[System Time Marker]` boundaries after `>= 45` minutes of silence, resets topic-fixation counters across sessions, forbids verbatim bio-quote parroting, strips novel-style outer dialogue quotes, and prunes excessive inline stage directions.
-* **Multimodal Vision, Luminance-Adaptive Meme Synthesis & Director-Mode TTS (`media_engine.py`, `ai_services.py`):**
-  * **Perceptual Motion-Aware 2x2 Video & GIF Storyboarding:** Uses OpenCV (`cv2`) and Pillow (`PIL`) under a bounded hardware semaphore (`threading.BoundedSemaphore(2)`) to sample 4 chronological keyframes (`10%`, `36%`, `64%`, `90%`) from videos, animated GIFs/WebPs, and Discord stickers—scoring contrast, Laplacian sharpness (`cv2.Laplacian`), and 16x16 grayscale frame-to-frame motion delta—and stamps sequence badges (`1`–`4`) onto a unified 2x2 storyboard grid.
-  * **Cross-Process Vision Deduplication & Zero-Cost Link Context:** Coordinates atomic `PROCESSING|<timestamp>|<bot_id>` locks in `shared_image_cache.json` and an in-memory SHA-256 digest cache (`_VISION_HASH_CACHE`) so uploaded media is analyzed by the 235B Vision model only once across all processes and reused by `auto_react` on the fast text model. Filters out generic webpage favicons (`is_visual_media_candidate`) while extracting `0ms` article titles and descriptions from embeds (`extract_webpage_embed_context`).
-  * **Subject-Faithful Prompt Grounding & Luminance-Adaptive Meme Engine:** Strips conversational filler from bot replies, enforces multi-line and history-aware user subject fidelity (`_extract_explicit_requested_subject`), rewrites overlapping visual compositions, and refreshes stale meme punchlines. Renders classic Impact-style captions via Pillow with automatic clause-pivot setup/punchline splitting, vertical center-subject safe zones (preserving the middle 52% of the canvas), and `ImageStat` background luminance sampling to boost stroke width and shadow alpha over bright regions.
-  * **Expressive Neural Voice Synthesis:** Rescues trailing media/memory tags from unclosed voice blocks, validates pronounceable dialogue, and parses Director Mode headers (`Role`, `Scene`, `Guidance`) and inline vocal performance tags (`[sigh]`, `[chuckle]`, `[pauses for a moment]`) for `MiMo-V2.5-tts-voicedesign`.
-* **Self-Healing Resilience & In-Character Glitch Awareness:**
-  * Automatic model failover chains across primary and backup Vision (`Qwen3-VL-235B`, `Qwen2.5-VL-32B`, `Llama-3.2-90B-Vision`) and Text (`Qwen3-235B`, `Qwen3-30B`, `Llama-3.3-70B`) endpoints.
-  * Sanitizes upstream HTML/gateway error strings (`sanitize_api_error_text`) and converts transient API drops into structured `[System Glitch Context]` events, allowing agents to react to lag spikes in-character without echoing raw error strings.
-
+Key Engineering Highlights
+SRE Process Orchestrator & Real-Time Web-UI Control Plane (`orchestrator.py`, `web\_dashboard.html`):
+Zero-Dependency `asyncio` HTTP/SSE Server & Port Auto-Scanner: Serves a single-file dark-mode cognitive control plane on `127.0.0.1:8765` (automatically probing ports `8765..8799` in $<1\text{ ms}$ to avoid collisions with standard web-dev ports `3000`, `5173`, `8000`, `8080`). Streams live IPC logs, telemetry, and subconscious JSON payloads over `text/event-stream`.
+Leaky Token-Bucket Restart Guard & Orphaned Process Reaper: Models child process stability via $B_t = \min(B_{\max}, B_{t-1} + r \cdot \Delta t) - 1$ with full-jitter exponential backoff ($t_{\text{sleep}} = \min(300, 2^k + U(0, 1.5))$), tripping a `QUARANTINED` circuit breaker after 4 crashes in $90\text{ s}$. Automatically sweeps and terminates detached orphan processes and stale `.lock`/`.tmp` files on startup and stop.
+AST-Validated Zero-Downtime Rolling Hot-Reload: Monitors `.py` file `st\_mtime\_ns` timestamps across `python\_modules/` and `bots/`. On file save, validates syntax via `ast.parse()` and `py\_compile` before executing a staggered $2.0\text{ s}$ rolling restart across active agents—aborting the reload if syntax errors are detected so running bots never crash.
+Native OS RAM/CPU Profiler, FinOps Ledger & Web-UI Bot Studio: Polls child PID Working Set RAM (MB) and CPU % every $3\text{ s}$ using native Win32 `ctypes` (`GetProcessMemoryInfo` / `GetProcessTimes`) and POSIX `/proc` APIs with zero `psutil` dependency. Includes an in-browser Bot Studio (create new bots, edit constants/prompts with AST validation, and manage `.env` keys), a Fruchterman-Reingold Force-Directed Social Graph Canvas, and a 1-click Public HTTPS Tunnel Manager (`cloudflared` / `ssh`) gated by constant-time `WEBUI\_ADMIN\_TOKEN` authentication.
+Cross-Process Concurrency, Dead-PID Lock Recovery & EWMA Circuit Breakers (`core\_system.py`, `main\_bot.py`):
+OS-Agnostic Atomic File Locking: Built a cross-process synchronization engine (`FileLock`) using atomic `O\_CREAT | O\_EXCL` lockfiles, monotonic timeout tracking, and atomic `.tmp` file replacement (`os.replace`). Inspects lockfile `<pid>|<timestamp>` headers against the OS process table (`OpenProcess`/`GetExitCodeProcess` on Windows; `os.kill(pid, 0)` on POSIX) to evict locks held by terminated processes in $0\text{ ms}$.
+Zero-Copy Serialization & Nanosecond RAM Cache: Enables independent bot processes to read and mutate shared JSON state (`chat\_memory.json`, `shared\_image\_cache.json`, `general\_knowledge.json`) concurrently without race conditions. Backed by a thread-safe (`threading.RLock`) `(st\_mtime\_ns, st\_size)` RAM cache (`0.001ms` reads) with non-blocking `asyncio.to\_thread` I/O wrappers.
+Velocity-Aware Adaptive Coalescing & Situational Sampling: Dynamically adjusts message coalescing windows (`0.12s` fast-path for complete punctuated sentences $\ge 5$ words, saving $\sim 730\text{ ms}$ of typing latency, vs. `1.25s` for short unpunctuated fragments) and modulates `(temperature, top\_p)` per turn (`(0.45, 0.85)` for Technical/Code/Math precision vs. `(0.85, 0.92)` for creative banter).
+EWMA Latency Tracker & Adaptive Circuit Breaker: Tracks Exponentially Weighted Moving Average latency ($L_t = 0.3 \cdot t_{\text{obs}} + 0.7 \cdot L_{t-1}$) and error rates per `(endpoint, model)` pair, sorting fallback models by lowest effective latency $L_t / (1 - P_{\text{err}})$ when a primary endpoint trips its circuit breaker.
+Two-Wave Multi-Agent Coordination, Hawkes Process Engagement & Discovery (`bot\_discovery.py`):
+Two-Wave Co-Star Micro-Batching & Crowd Cap (10–50 Bot Scale): Caps collective greetings (`"hey bots"`) at 3 responders max. When multiple agents are addressed (`"hey guild assistant and cat bot"`), Wave 1 (`slot 0`) generates immediately ($0\text{ ms}$ wait) while Wave 2 Co-Stars (`slot >= 1`) wait in parallel on Wave 1 ($\le 2.2\text{ s}$ max), reload shared history to read Wave 1's remark, and generate simultaneously—preventing $N \times 2.5\text{ s}$ serial latency stacking.
+Self-Exciting Hawkes Process & Progressive Pity Timer: Models human message arrival intensity via $\lambda(t) = \sum \alpha e^{-\beta (t - t_k)}$ ($\alpha = 0.18, \beta = 0.035\text{ s}^{-1}$) to boost spontaneous engagement during rapid multi-user banter, paired with a $+1.5%/\text{msg}$ progressive pity timer since the agent last spoke.
+Possessive-Safe Longest-Match Disambiguation & 4-Stage Follow-Up Resolver: Disambiguates multi-agent addressing using possessive-safe boundaries (`\_term\_boundary\_pattern`) and longest-match-first token subsumption. Combines $O(1)$ tombstone/turn-cap checks (Stage 0), deterministic addressing/dismissal filters (Stage 1), stem-aware lexical/visual overlap (Stage 2), and a fast `Qwen3-30B-A3B` classifier (Stage 3).
+Two-Phase Subconscious Cognitive Engine, Okapi BM25 + Ebbinghaus RAG & Social Graph (`subconscious\_engine.py`, `memory\_and\_context.py`):
+Two-Phase Brain Split & Hidden `\[THOUGHT:]` Subtext: Phase A (Conscious Reflex) strips hidden `\[THOUGHT: ...]` inner-monologue reasoning, injects $0\text{ ms}$ AST math/unit/Python syntax grounding tools, and dispatches the Discord reply immediately. Phase B (Subconscious Reflection) runs asynchronously post-send (`asyncio.create\_task`) on `Qwen/Qwen3-30B-A3B` under a single-leader per-message lock (`\_subconscious\_leader\_msg`) to extract user facts, server lore, rapport shifts, room state, 5-turn TTL room props, and episodic session chapters in a single batched JSON call.
+1–100 Salience Spectrum, Okapi BM25 & Ebbinghaus Forgetting Curve: Tags memories with `\[S:XX|CAT|YYYY-MM-DD|R:N]` across `CORE`/`BOUNDARY` ($S \ge 90$, $\tau = \infty$, immune to eviction), `PROJECT`/`PREF`/`REL` ($\tau = 120\text{d}$), `HABIT`/`LORE` ($\tau = 35\text{d}$), and `SITUATIONAL` ($\tau = 7\text{d}$). Computes retention via:
+$$R(t) = S \cdot \exp\left(-\frac{\Delta t_{\text{days}}}{\tau_{\text{cat}} \cdot (1 + 0.4 \cdot C_{\text{recall}})}\right)$$
+and retrieves topically relevant memories in $<1\text{ ms}$ using Okapi BM25 ($k_1 = 1.5, b = 0.75$) + semantic tag expansion.
+Heider's Structural Balance Theory & Schmitt-Trigger Hysteresis: Models server relationships as a signed directed graph $G = (V, E, w)$ where $w_{ij} \in [-100, +100]$. Evaluates triadic rapport shifts via $\Delta w_{i \to A} = \text{round}(8.0 \cdot \tanh(w_{i \to B} / 45.0) \cdot \text{Valence}(A \to B))$, applies $1/\sqrt{k}$ session diminishing marginal returns, and stabilizes Disposition Tier transitions with a $\pm 3$-point Schmitt-Trigger hysteresis band.
+Kolmogorov Complexity (`zlib` NCD) Anti-Loop & Token-Budgeted Context Slicer: Computes Normalized Compression Distance $\text{NCD}(x, y) = \frac{C(x \cdot y) - \min(C(x), C(y))}{\max(C(x), C(y))}$ across recent bot replies in $0.04\text{ ms}$ (injecting a structural pivot directive if $\text{NCD} < 0.42$) and enforces a $\sim 3,500$-token dynamic context budget.
+Perceptual dHash Vision, Action-Flux/Entropy Storyboards, Saliency Memes & Bidirectional Voice (`media\_engine.py`, `ai\_services.py`):
+64-Bit Perceptual dHash Vision Cache: Computes a $9 \times 8$ horizontal gradient bitmask (`compute\_dhash\_64`) and checks bitwise XOR Hamming distance $\le 5$ so reposted or re-compressed memes, stickers, and GIFs resolve from cache in $0.1\text{ ms}$ with zero Vision API calls.
+Temporal Action-Flux ($L_1$) & Shannon Entropy 2x2 Storyboarding: Samples candidate frames across videos (`.mp4`, `.webm`, `.mov`) and animated GIFs/WebPs under a bounded semaphore (`BoundedSemaphore(2)`), scoring Shannon entropy $H = -\sum p_k \log_2 p_k$, Laplacian sharpness, and temporal motion flux $|I_t - I_{t-1}|_1$ to stamp peak action keyframes (`1`–`4`) onto a 2x2 storyboard.
+Image-to-Image Style Remixing & Laplacian Edge-Energy Saliency Memes: Supports natural image remixing (`"remix this in cyberpunk style"`) by blending Vision descriptions into FLUX prompts, attaches interactive `\[🎨 View Prompt]` and `\[🔄 Redraw]` buttons, and measures 2D discrete Laplacian edge energy in top vs. bottom bands so single-caption memes never obscure high-detail subject faces.
+Bidirectional Voice (Whisper STT + MiMo-V2.5-TTS): Transcribes human Discord voice notes (`.ogg`, `.mp3`, `.wav`, `.m4a`) via `openai/whisper-large-v3-turbo` and synthesizes expressive replies with `MiMo-V2.5-tts-voicedesign`.
+Interactive Discord UI Hub (`/hub`), Fuzzy Typo Forgiveness & Zero-PII Security Firewall (`commands\_and\_embeds.py`):
+Single Clutter-Free `/hub` Slash Command & Damerau-Levenshtein ($\le 2$) Typo Correction: Registers an instant guild-synced `/hub` slash command (and auto-heals text command typos like `!whoam` $\rightarrow$ `!whoami`) that opens an interactive `discord.ui.View` card with `\[🗂️ Dossier]`, `\[🌐 Social Graph]`, `\[📖 Chapters]`, `\[✏️ Manage My Facts]`, and `\[⚙️ Admin Panel]` tabs.
+Strict Caller Ownership Isolation & $0\text{ ms}$ Zero-PII Firewall: Binds personal fact management strictly to `interaction.user.display\_name` (preventing users from editing another member's profile) and scrubs all candidate facts through `sanitize\_or\_reject\_sensitive\_pii`—allowing first names while redacting surnames from full-name strings and blocking street addresses, emails, phone numbers, SSNs, credit cards, and API keys.
 ---
-
-## System Architecture
-
+System Architecture
 ```text
++===================================================================================+
+|         SUPERVISOR \& REAL-TIME WEB-UI CONTROL PLANE (orchestrator.py)             |
+|  • Auto-Port http://127.0.0.1:8765+  | Built-In HTTPS Tunnel (cloudflared / ssh)  |
+|  • Leaky-Bucket Restart Guard        | AST Rolling Hot-Reload | Ghost PID Reaper  |
+|  • Live SSE Dashboard (web\_dashboard.html):                                       |
+|     ├─ Force-Directed Social Graph   | Subconscious \[THOUGHT:] X-Ray Stream       |
+|     └─ Ebbinghaus Salience CRUD      | Bot Studio Editor, .env \& FinOps Matrix    |
++=========================================+=========================================+
+                                          | (Spawns, Monitors \& Streams IPC)
+                                          v
 +-----------------------------------------------------------------------------------+
 |                                  DISCORD SERVER                                   |
-|      User Messages, @Mentions, Replies, Images, Videos, Stickers, & Commands      |
+|   /hub Slash Command, @Mentions, Replies, Voice Notes, Videos, Images \& Reactions |
 +-----------------------------------------+-----------------------------------------+
                                           |
                    +----------------------+----------------------+
                    |                      |                      |
                    v                      v                      v
         +--------------------+ +--------------------+ +--------------------+
-        |  guild_assistant   | |  custom_agent_01   | |  custom_agent_02   |
-        |   (Process #1)     | |    (Process #2)    | |    (Process #3)    |
+        |  guild\_assistant   | |      cat\_bot       | |  custom\_agent\_01   |
+        |   (Process #1)     | |   (Process #2)     | |    (Process #3)    |
         +---------+----------+ +----------+---------+ +----------+---------+
                   |                       |                      |
                   +-----------------------+----------------------+
                                           |
                                           v
 +-----------------------------------------------------------------------------------+
-|                     MODULAR PYTHON ENGINE (bot_info/python_modules)               |
+|                     MODULAR PYTHON ENGINE (bot\_info/python\_modules)               |
 |                                                                                   |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
-|  |      main_bot.py      |  |   bot_discovery.py    |  | memory_and_context.py |  |
-|  | Two-phase turn locks, |  | Cross-bot registry,   |  | IDF specificity gate, |  |
-|  | atomic vision claims, |  | floor-yielding logic, |  | fact consolidation,   |  |
-|  | & coalescing pipeline |  | & 4-stage follow-ups  |  | & hearsay verifier    |  |
+|  |      main\_bot.py      |  |   bot\_discovery.py    |  | subconscious\_engine.py|  |
+|  | Adaptive coalescing,  |  | Two-Wave coordinator, |  | Async 30B JSON turn   |  |
+|  | situational sampling, |  | Hawkes process chime, |  | harvester, BM25 +     |  |
+|  | \& Whisper/FLUX/TTS    |  | \& 4-stage follow-ups  |  | Ebbinghaus \& Zero-PII |  |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
 |                                                                                   |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
-|  |    ai_services.py     |  |    media_engine.py    |  |   core_system.py      |  |
-|  | SHA-256 vision cache, |  | Motion/Laplacian 2x2  |  | Dead-PID FileLock,    |  |
-|  | subject-faithful FLUX,|  | storyboards & Pillow  |  | circuit breaker, RAM  |  |
-|  | emoji & MiMo TTS      |  | luminance meme engine |  | cache & HTTP pooling  |  |
+|  | memory\_and\_context.py |  |    media\_engine.py    |  |    ai\_services.py     |  |
+|  | Heider balance graph, |  | 64-bit dHash, Entropy |  | Perceptual dHash hit, |  |
+|  | Schmitt hysteresis,   |  | \& Action-Flux 2x2     |  | image remixing, FLUX, |  |
+|  | \& zlib NCD anti-loop  |  | video \& saliency meme |  | Whisper STT \& MiMo TTS|  |
+|  +-----------------------+  +-----------------------+  +-----------------------+  |
+|                                                                                   |
+|  +-----------------------+  +-----------------------+  +-----------------------+  |
+|  |commands\_and\_embeds.py |  |  text\_and\_parsers.py  |  |    core\_system.py     |  |
+|  | /hub slash card, UI   |  | \[THOUGHT:] stripper,  |  | Dead-PID FileLock,    |  |
+|  | modals, typo fixer \&  |  | Drift Guard \& 0ms AST |  | EWMA latency failover,|  |
+|  | caller-isolated CRUD  |  | math/unit/code tools  |  | RAM cache \& HTTP pool |  |
 |  +-----------------------+  +-----------------------+  +-----------------------+  |
 +-----------------------------------------+-----------------------------------------+
                                           |
                                           v
 +-----------------------------------------------------------------------------------+
-|                  ATOMIC SHARED & PER-BOT PERSISTENCE (JSON + FileLock)            |
+|                  ATOMIC SHARED \& PER-BOT PERSISTENCE (JSON + FileLock)            |
 |                                                                                   |
-|  [Shared Across All Agents]                 [Isolated Per-Agent Persona]          |
-|  - chat_memory.json (Short-Term Context)    - <agent>_long_term_memory.json       |
-|  - shared_image_cache.json (Vision & Reg)   - <agent>_user_profiles.json          |
-|  - general_knowledge.json (Universal Facts) - <agent>_channel_configs.json        |
+|  \[Shared Across All Agents]                 \[Isolated Per-Agent Persona]          |
+|  - chat\_memory.json (In-Place Reactions)    - <agent>\_long\_term\_memory.json       |
+|  - shared\_image\_cache.json (dHash \& State)  - <agent>\_user\_profiles.json          |
+|  - general\_knowledge.json (Universal Facts) - <agent>\_channel\_configs.json        |
 +-----------------------------------------------------------------------------------+
 ```
-
 ---
-
-## Repository Structure
-
+Repository Structure
 ```text
 multi-agent-discord-framework/
 ├── bots/
-│   ├── guild_assistant.py                 # Reference steward & quartermaster AI agent
-│   ├── custom_agent_alpha.py              # Additional autonomous persona script #1
-│   ├── custom_agent_beta.py               # Additional autonomous persona script #2
-│   └── bot_info/
-│       ├── .env                           # API keys & Discord tokens (gitignored)
-│       ├── bot_logs/                      # Per-agent background execution logs
-│       ├── bot_startup_scripts/           # Auto-generated headless process runners
-│       ├── config_files/                  # Per-channel runtime settings JSONs
-│       ├── long_term_memory/              # Per-agent lore, user dossiers & shared general facts
-│       ├── short_term_memory/             # Shared channel history & vision cache JSONs
-│       └── python_modules/
-│           ├── main_bot.py                # Core Discord client lifecycle & turn orchestration
-│           ├── ai_services.py             # Vision cache, contextual emojis, image/meme & TTS
-│           ├── bot_discovery.py           # Multi-agent registry, floor yielding & follow-ups
-│           ├── memory_and_context.py      # IDF retrieval, fact consolidation & hearsay filter
-│           ├── media_engine.py            # OpenCV/PIL storyboards, luminance memes & Giphy/YT
-│           ├── text_and_parsers.py        # MiMo TTS tag sanitizer, quote de-wrapper & parser
-│           ├── core_system.py             # Dead-PID FileLock, circuit breaker & HTTP pool
-│           ├── config.py                  # Pre-compiled regexes, IDF lexicons & fallbacks
-│           └── bot_editor.py              # Interactive CLI for editing agent constants & keywords
-├── manage_bots.bat                        # Windows CLI Manager (PowerShell/WMI process control)
-├── manage_bots.sh                         # POSIX/Linux/macOS CLI Manager (Bash process control)
-├── universal_copy_paste_bot_template.py   # Drop-in template for spinning up new AI personas
+│   ├── guild\_assistant.py                 # Reference steward \& quartermaster AI agent
+│   ├── cat\_bot.py                         # Reference non-verbal / expressive companion AI agent
+│   ├── custom\_agent\_alpha.py              # Additional autonomous persona script
+│   └── bot\_info/
+│       ├── .env                           # API keys, Discord tokens \& WEBUI\_ADMIN\_TOKEN (gitignored)
+│       ├── bot\_logs/                      # Per-agent real-time execution logs
+│       ├── config\_files/                  # Per-channel runtime settings JSONs
+│       ├── long\_term\_memory/              # Per-agent lore, user dossiers \& shared general facts
+│       ├── short\_term\_memory/             # Shared channel history, dHash vision cache \& room state
+│       └── python\_modules/
+│           ├── orchestrator.py            # OS process supervisor, FinOps profiler \& HTTP/SSE server
+│           ├── web\_dashboard.html         # High-contrast OLED real-time cognitive control plane UI
+│           ├── main\_bot.py                # Core Discord client lifecycle, /hub sync \& turn pipeline
+│           ├── subconscious\_engine.py     # Post-send 30B JSON analyzer, BM25/Ebbinghaus \& Zero-PII
+│           ├── memory\_and\_context.py      # Heider social graph, NCD anti-loop \& context assembly
+│           ├── commands\_and\_embeds.py     # /hub slash card, interactive UI views/modals \& commands
+│           ├── ai\_services.py             # Perceptual dHash cache, image remix, FLUX, Whisper \& TTS
+│           ├── bot\_discovery.py           # Two-Wave coordinator, Hawkes process \& follow-up resolver
+│           ├── media\_engine.py            # OpenCV/PIL entropy storyboards, saliency memes \& dHash
+│           ├── text\_and\_parsers.py        # \[THOUGHT:] \& TTS parser, Drift Guard \& 0ms AST tools
+│           ├── core\_system.py             # Dead-PID FileLock, EWMA latency tracker \& RAM cache
+│           ├── config.py                  # Pre-compiled regexes, salience constants \& fallbacks
+│           └── test\_framework.py          # Offline unit \& integration test suite (12/12 tests)
+├── manage\_bots.bat                        # 1-Click Windows Orchestrator \& Web-UI Launcher
+├── manage\_bots.sh                         # 1-Click POSIX/Linux/macOS Orchestrator \& Web-UI Launcher
+├── universal\_copy\_paste\_bot\_template.py   # Drop-in template for spinning up new AI personas
 └── LICENSE
 ```
-
 ---
-
-## Getting Started
-
-### 1. Prerequisites
-* **Python 3.10+**
-* **API Keys:**
-  * One or more **Discord Bot Tokens** (with `Message Content Intent` and `Server Members Intent` enabled in the Discord Developer Portal).
-  * A **DeepInfra API Key** (for LLM text, Vision, FLUX image generation, and MiMo TTS).
-  * *(Optional)* A **Giphy API Key** (for reaction GIF search).
-
-### 2. Installation
+Getting Started
+1. Prerequisites
+Python 3.10+
+API Keys:
+One or more Discord Bot Tokens (with `Message Content Intent` and `Server Members Intent` enabled in the Discord Developer Portal).
+A DeepInfra API Key (for LLM text, Vision, Whisper STT, FLUX image generation, and MiMo TTS).
+(Optional) A Giphy API Key (for reaction GIF search).
+2. Installation
 Clone the repository and install the required Python dependencies:
-
 ```bash
 git clone https://github.com/disciplehazen/multi-agent-discord-framework.git
 cd multi-agent-discord-framework
 pip install discord.py requests python-dotenv Pillow opencv-python
 ```
-
-### 3. Configuration & Launching via the CLI Manager
-You can manage the entire lifecycle of your agents—including adding API keys, creating new personas, editing model parameters/keywords, and toggling background processes—using the included interactive CLI manager:
-
-* **Windows:**
-  ```cmd
-  manage_bots.bat
+3. Launching the Supervisor & Real-Time Web-UI Control Plane
+Launch the unified process orchestrator and Web-UI dashboard using the included launcher scripts:
+Windows:
+```cmd
+  manage\_bots.bat
   ```
-* **Linux / macOS:**
-  ```bash
-  chmod +x manage_bots.sh
-  ./manage_bots.sh
+Linux / macOS:
+```bash
+  chmod +x manage\_bots.sh
+  ./manage\_bots.sh
   ```
-
-From the CLI menu:
-1. Press **`[A]` (API Keys)** to save your `DEEPINFRA_TOKEN` and `GIPHY_TOKEN` into `bots/bot_info/.env`.
-2. Add your Discord bot tokens to `bots/bot_info/.env` (e.g., `GUILDBOT_DISCORD_TOKEN=...`, `AGENT_ALPHA_DISCORD_TOKEN=...`) or press **`[C]` (Create Bot)** to generate a new agent script and register its token automatically.
-3. Press **`[1-N]` (Toggle Bot)** to launch or stop any agent as a detached background process with automatic log redirection to `bots/bot_info/bot_logs/`.
-
+Run Offline Unit Test Suite:
+```bash
+  ./manage\_bots.sh --test
+  ```
+Once launched:
+Open `http://127.0.0.1:8765` in your browser (all discovered bots start in `STOPPED` standby mode by default so you can choose which agents to launch, or pass `--autostart` to start all agents on boot).
+Open the `🔑 API Keys \& .env` tab to save your `DEEPINFRA\_TOKEN`, `GIPHY\_TOKEN`, and bot tokens into `bots/bot\_info/.env`.
+Open the `🛠️ Bot Studio` tab to create new bots (`\[C] Create Bot Wizard`), edit model constants/prompts (`\[E] Visual Config Editor`), or start/restart individual bots from the `🖥️ Fleet \& FinOps` tab.
+(Optional Remote Admin Access) Click `START PUBLIC TUNNEL` in the Web-UI header to provision a secure HTTPS tunnel, or type `@BotName admin webui` in Discord to receive a private 1-click magic login link via DM.
 ---
-
-## In-Chat Command Suite
-
-### User Commands
-| Command | Description |
-| :--- | :--- |
-| `@BotName !help` | Displays the complete in-chat command reference. |
-| `@BotName !whoami` | Displays the permanent dossier facts this agent has learned about you. |
-| `@BotName !forgetme <keyword\|all>` | Removes specific matching facts (or wipes `all` facts) from your personal profile. |
-
-### Administrator Channel & Memory Controls
-| Command | Description |
-| :--- | :--- |
-| `@BotName admin status` | Shows channel configuration, active media flags, and memory counts. |
-| `@BotName admin enable` / `disable` | Enables or disables the agent in the current channel. |
-| `@BotName admin reactonly on` / `off` | Toggles silent emoji-reaction-only mode in the current channel. |
-| `@BotName admin chances <resp> <emoji>` | Sets baseline spontaneous chime-in (`0.0–1.0`) and emoji reaction (`0.0–1.0`) probabilities. |
-| `@BotName admin random <minutes>` | Sets the unprompted periodic post timer in minutes (`0` = disabled). |
-| `@BotName admin temp <0.1-1.5>` | Adjusts the LLM creativity temperature for the current channel. |
-| `@BotName admin features <type> <on\|off>` | Toggles `vision`, `gifs`, `image` (images & memes), or `voice` per channel. |
-| `@BotName admin memory` | Displays a snapshot of learned Server Lore, Shared General Facts, and User Profiles. |
-| `@BotName admin learn <fact>` | Manually adds or consolidates a server-specific lore entry. |
-| `@BotName admin learngeneral <fact>` | Manually adds or consolidates a shared universal knowledge fact across all agents. |
-| `@BotName admin learnuser <user> \| <fact>` | Manually adds or consolidates a fact in a specific user's dossier. |
-| `@BotName admin forget <keyword>` | Purges any server lore, general fact, or user dossier entry matching `<keyword>`. |
-| `@BotName !clearmemory` | Wipes short-term conversation history and recent generated media cache for the current channel. |
-
+In-Chat Command Suite
+Commands can be triggered via the `/hub` slash command, `@BotName` mention, direct reply to a bot's message, keyword prefix (e.g., `steward !whoami` or `kitty !chapters`), or multi-bot broadcast (`!bots status`). Damerau-Levenshtein ($\le 2$) fuzzy matching automatically corrects typos like `!whoam` or `!chaptrs`.
+User Commands & Interactive Hub
+Command	Description
+`/hub \[target] \[private]`	Opens the all-in-one interactive Dossier Hub card with buttons for `\[🗂️ Dossier]`, `\[🌐 Social Graph]`, `\[📖 Chapters]`, caller-isolated `\[✏️ Manage My Facts]`, and `\[⚙️ Admin Panel]`.
+`@BotName !whoami \[name]`	Opens the interactive Dossier Hub & Affinity progress bar (`-100` to `+100`) for yourself or another member/bot.
+`@BotName !relationships`	Displays the agent's complete Server Social Graph (`Trusted Inner Circle`, `Friendly Allies`, `Comedic Foils`, and `Rivals`).
+`@BotName !chapters`	Displays rolling Episodic Session Chapters (storyline recaps synthesized by the Subconscious Engine).
+`@BotName !forgetme <keyword|all>`	Removes specific matching facts (or wipes `all` personal facts) strictly from your own profile.
+`!bots status` / `!bots whoami`	Broadcasts a status or dossier check across all active bots in the channel simultaneously.
+`@BotName !help`	Displays the complete in-chat command reference.
+Administrator Channel, Web-UI & Memory Controls
+Command	Description
+`@BotName admin webui`	Sends a verified Server Administrator a private 1-click magic login link to the live Web-UI Control Plane via DM.
+`@BotName admin status`	Shows channel configuration, active media flags, welcome greeter state, and memory counts.
+`@BotName admin enable` / `disable`	Enables or disables the agent in the current channel.
+`@BotName admin welcome <on|off|test>`	Enables, disables, or previews in-character server-join welcome messages in the current channel.
+`@BotName admin reactonly on` / `off`	Toggles silent emoji-reaction-only mode in the current channel.
+`@BotName admin chances <resp> <emoji>`	Sets baseline spontaneous chime-in (`0.0–1.0`) and emoji reaction (`0.0–1.0`) probabilities.
+`@BotName admin random <minutes>`	Sets the unprompted periodic post timer in minutes (`0` = disabled).
+`@BotName admin temp <0.1-1.5>`	Adjusts the baseline LLM creativity temperature for the current channel.
+`@BotName admin features <type> <on|off>`	Toggles `vision`, `gifs`, `image` (images & memes), or `voice` per channel.
+`@BotName admin memory`	Displays a salience-tagged snapshot of learned Server Lore, Shared General Facts, and User Profiles.
+`@BotName admin learn <fact>`	Manually adds or consolidates a server-specific lore entry (protected by the Zero-PII Firewall).
+`@BotName admin learngeneral <fact>`	Manually adds or consolidates a shared universal knowledge fact across all agents.
+`@BotName admin learnuser <user> | <fact>`	Manually adds or consolidates a fact in a specific user's or bot's dossier.
+`@BotName admin forget <keyword>`	Purges any server lore, general fact, or user dossier entry matching `<keyword>`.
+`@BotName !clearmemory`	Wipes short-term conversation history and recent generated media cache for the current channel.
 ---
-
-## Creating Custom Personas
-
-To add a new autonomous agent with full access to shared vision, custom meme generation, and cross-agent discovery:
-1. Copy `universal_copy_paste_bot_template.py` into the `bots/` directory (e.g., `bots/archivist_agent.py`) or use option **`[C]`** in the CLI manager.
-2. Customize `BOT_SLUG`, `DISCORD_TOKEN_ENV_VAR`, `TRIGGER_KEYWORDS`, `IMAGE_STYLE_HINT`, and `VOICE_ROLE_HINT`.
-3. Use option **`[E]` (Edit Config)** in the CLI manager at any time to live-edit constants or manage trigger keywords via `bot_editor.py`.
-
+Creating Custom Personas
+You can spin up new autonomous agents with full access to shared perceptual vision, custom meme generation, voice synthesis, and cross-agent discovery in two ways:
+Via the Web-UI Bot Studio (Recommended): Open `http://127.0.0.1:8765` $\rightarrow$ `Bot Studio` tab, enter the Bot Name, Discord Token, Trigger Keywords, and System Prompt Identity, and click `Create Bot \& Start Immediately`. The supervisor automatically writes `bots/<name>.py`, registers `<NAME>\_DISCORD\_TOKEN` in `bots/bot\_info/.env`, validates the AST, and spawns the agent.
+Via Template Script: Copy `universal\_copy\_paste\_bot\_template.py` into `bots/` (e.g., `bots/archivist\_agent.py`) and customize `TOKEN`, `TRIGGER\_KEYWORDS`, and `get\_system\_prompt()`.
 ---
-
-## License
-
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for full details.
+License
+Distributed under the MIT License. See `LICENSE` for full details.

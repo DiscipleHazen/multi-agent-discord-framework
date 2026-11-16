@@ -1,14 +1,17 @@
 # API Keys and Secrets
 .env
+bots/bot_info/.env
 
 # Local Editor Settings
 .vscode/
 
-# Python Cache
+# Auto-downloaded binaries, lockfiles & Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-bot_info/python_modules/__pycache__/
+*.lock
+*.tmp
+cloudflared
+cloudflared.exe
 
 # Bot Memory and Logs
 bots/bot_info/bot_logs/*
@@ -29,7 +32,6 @@ bots/bot_info/config_files/*
 # Virtual Environments (if added later)
 venv/
 env/
-
 
 # Ignored Bot Scripts
 bots/*.py

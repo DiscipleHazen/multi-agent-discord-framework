@@ -14,14 +14,20 @@ from config import (
     FALLBACK_VISION_MODELS, FALLBACK_TEXT_MODELS, JSON_EMOJI_REGEX,
     REACT_NOTE_EXTRACT_REGEX, ERROR_REPLY_STRIP_REGEX, IMAGE_DESC_EXTRACT_REGEX,
     STOPWORDS, USER_SUBJECT_EXTRACT_REGEX, OVERUSED_MEME_CAPTIONS,
-    TOPIC_CHANGE_REQUEST_REGEX
+    TOPIC_CHANGE_REQUEST_REGEX, IMAGE_REMIX_REQ_REGEX
 )
-from core_system import post_with_backoff, update_json_file, is_model_circuit_open
+from core_system import (
+    post_with_backoff, update_json_file, load_json_file, is_model_circuit_open,
+    get_http_session, record_model_outcome, rank_models_by_ewma_latency
+)
 from text_and_parsers import (
     parse_mimotts_voice_block, parse_meme_gen_tag, PROMPT_BAKED_TEXT_STRIP_REGEX,
     _is_placeholder_caption, sanitize_api_error_text
 )
-from media_engine import safe_download_url_bytes, render_meme_captions
+from media_engine import (
+    safe_download_url_bytes, render_meme_captions,
+    compute_dhash_64, dhash_hamming_distance
+)
 
 # ==============================================================================
 # PRE-COMPILED REGEXES & CACHES FOR VISION, EMOJIS, IMAGE, MEME & VOICE ENGINES
@@ -76,10 +82,12 @@ NON_VERBAL_VOCALIZATION_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# SHA-256 Vision cache so reposted images/GIFs/stickers resolve in 0ms with 0 API calls
+# SHA-256 + 64-Bit Perceptual dHash Vision cache (Hamming distance <= 5 resolves in ~0.1ms with 0 API calls)
 _VISION_CACHE_LOCK = threading.RLock()
 _VISION_HASH_CACHE: dict[str, str] = {}
-_MAX_VISION_HASH_ITEMS = 128
+_VISION_DHASH_CACHE: dict[int, str] = {}
+_MAX_VISION_HASH_ITEMS = 160
+_DHASH_HAMMING_THRESHOLD = 5
 
 
 def _stem_visual_token(w: str) -> str:
@@ -133,18 +141,77 @@ def _strip_conversational_filler_from_reply(reply_text: str) -> str:
     return without_emotes
 
 
-async def summarize_image_for_memory(image_bytes: bytes, api_key: str, vision_model: str, api_url: str) -> str:
+def lookup_perceptual_vision_cache(
+    image_bytes: bytes,
+    shared_image_cache_file: str = "",
+    hamming_threshold: int = _DHASH_HAMMING_THRESHOLD,
+) -> tuple[str, str, int | None]:
+    """
+    Upgrade #1 — Fast 0.1ms Perceptual Vision Cache Lookup:
+    Checks exact SHA-256 digest first, then scans 64-bit perceptual dHashes
+    (in-RAM `_VISION_DHASH_CACHE` and cross-process `_dhash_vision_cache` in
+    `shared_image_cache.json`) for any entry with Hamming distance <= `hamming_threshold` (5).
+    Returns `(cached_summary_or_empty, sha256_hex, dhash_64_int)`.
+    """
+    if not image_bytes:
+        return "", "", None
+
+    img_hash = hashlib.sha256(image_bytes).hexdigest()
+    with _VISION_CACHE_LOCK:
+        exact_hit = _VISION_HASH_CACHE.get(img_hash)
+    if exact_hit:
+        return exact_hit, img_hash, None
+
+    img_dhash = compute_dhash_64(image_bytes)
+    if img_dhash is not None:
+        with _VISION_CACHE_LOCK:
+            for cand_dhash, summary_val in _VISION_DHASH_CACHE.items():
+                if dhash_hamming_distance(img_dhash, cand_dhash) <= hamming_threshold:
+                    _VISION_HASH_CACHE[img_hash] = summary_val
+                    return summary_val, img_hash, img_dhash
+
+        if shared_image_cache_file:
+            try:
+                shared_data = load_json_file(shared_image_cache_file, {})
+                shared_dhashes = shared_data.get("_dhash_vision_cache", {})
+                if isinstance(shared_dhashes, dict):
+                    for k_hex, summary_val in shared_dhashes.items():
+                        if not isinstance(summary_val, str) or not summary_val:
+                            continue
+                        try:
+                            cand_dhash = int(str(k_hex), 16)
+                        except ValueError:
+                            continue
+                        if dhash_hamming_distance(img_dhash, cand_dhash) <= hamming_threshold:
+                            with _VISION_CACHE_LOCK:
+                                _VISION_HASH_CACHE[img_hash] = summary_val
+                                _VISION_DHASH_CACHE[img_dhash] = summary_val
+                            return summary_val, img_hash, img_dhash
+            except Exception:
+                pass
+
+    return "", img_hash, img_dhash
+
+
+async def summarize_image_for_memory(
+    image_bytes: bytes,
+    api_key: str,
+    vision_model: str,
+    api_url: str,
+    shared_image_cache_file: str = "",
+) -> str:
     """
     Summarizes an attached image, meme, doodle, or numbered 2x2 video/GIF storyboard
-    into a concise, detail-rich memory tag, using an in-memory SHA-256 digest cache
-    so identical reposted images/stickers/GIFs never trigger redundant Vision API calls.
+    into a concise, detail-rich memory tag, using both an exact SHA-256 digest cache
+    and a 64-bit Perceptual dHash cache (Hamming distance <= 5) so reposted or
+    re-compressed memes/stickers/GIFs resolve in ~0.1ms with 0 Vision API calls.
     """
     if not image_bytes:
         return ""
 
-    img_hash = hashlib.sha256(image_bytes).hexdigest()
-    with _VISION_CACHE_LOCK:
-        cached_summary = _VISION_HASH_CACHE.get(img_hash)
+    cached_summary, img_hash, img_dhash = lookup_perceptual_vision_cache(
+        image_bytes, shared_image_cache_file=shared_image_cache_file
+    )
     if cached_summary:
         return cached_summary
 
@@ -182,7 +249,8 @@ async def summarize_image_for_memory(image_bytes: bytes, api_key: str, vision_mo
             bot_name="VisionCache"
         )
     if res is None or res.status_code in (429, 500, 502, 503, 504):
-        for fb_v_model in FALLBACK_VISION_MODELS:
+        ranked_vision_fallbacks = rank_models_by_ewma_latency(FALLBACK_VISION_MODELS, endpoint_label)
+        for fb_v_model in ranked_vision_fallbacks:
             if fb_v_model == vision_model:
                 continue
             fb_payload = {**payload, "model": fb_v_model}
@@ -207,6 +275,24 @@ async def summarize_image_for_memory(image_bytes: bytes, api_key: str, vision_mo
                     if len(_VISION_HASH_CACHE) >= _MAX_VISION_HASH_ITEMS:
                         _VISION_HASH_CACHE.pop(next(iter(_VISION_HASH_CACHE)), None)
                     _VISION_HASH_CACHE[img_hash] = formatted_desc
+                    if img_dhash is not None:
+                        if len(_VISION_DHASH_CACHE) >= _MAX_VISION_HASH_ITEMS:
+                            _VISION_DHASH_CACHE.pop(next(iter(_VISION_DHASH_CACHE)), None)
+                        _VISION_DHASH_CACHE[img_dhash] = formatted_desc
+
+                if shared_image_cache_file and img_dhash is not None:
+                    dhash_hex = f"{img_dhash:016x}"
+                    def _save_dhash(cache_d):
+                        dh_map = cache_d.setdefault("_dhash_vision_cache", {})
+                        if not isinstance(dh_map, dict):
+                            dh_map = {}
+                        dh_map[dhash_hex] = formatted_desc
+                        if len(dh_map) > 200:
+                            for old_k in list(dh_map.keys())[:-200]:
+                                dh_map.pop(old_k, None)
+                        cache_d["_dhash_vision_cache"] = dh_map
+                        return cache_d
+                    update_json_file(shared_image_cache_file, {}, _save_dhash)
                 return formatted_desc
         except Exception as e:
             print(f"[ERROR] Vision JSON parse error: {e}")
@@ -357,11 +443,19 @@ async def get_contextual_emojis(
         user_content = prompt_text
 
     endpoint_label = api_url.rsplit("/", 1)[-1] if api_url else "completions"
-    active_emoji_model = model
-    if is_model_circuit_open(f"{endpoint_label}:{model}"):
-        fb_list = FALLBACK_VISION_MODELS if image_bytes else FALLBACK_TEXT_MODELS
+    # Smart Model Routing: Use fast Qwen/Qwen3-30B-A3B (FALLBACK_TEXT_MODELS[0]) for text/cached-vision emoji selection
+    active_emoji_model = (
+        model
+        if image_bytes
+        else (FALLBACK_TEXT_MODELS[0] if FALLBACK_TEXT_MODELS else model)
+    )
+    if is_model_circuit_open(f"{endpoint_label}:{active_emoji_model}"):
+        fb_list = rank_models_by_ewma_latency(
+            FALLBACK_VISION_MODELS if image_bytes else (list(FALLBACK_TEXT_MODELS) + [model]),
+            endpoint_label,
+        )
         for fb_m in fb_list:
-            if fb_m != model:
+            if fb_m != active_emoji_model and not is_model_circuit_open(f"{endpoint_label}:{fb_m}"):
                 active_emoji_model = fb_m
                 break
 
@@ -423,7 +517,8 @@ async def auto_react(message: discord.Message, **kwargs) -> str | None:
     # the rich [Attached Media Description: ...] in text_to_use
     has_cached_vision_desc = "[Attached Media Description:" in (text_to_use or "")
     effective_img_bytes = None if has_cached_vision_desc else raw_img_bytes
-    active_model = kwargs["vision_model"] if effective_img_bytes else kwargs["text_model"]
+    fast_text_model = FALLBACK_TEXT_MODELS[0] if FALLBACK_TEXT_MODELS else kwargs["text_model"]
+    active_model = kwargs["vision_model"] if effective_img_bytes else fast_text_model
     existing_reactions = {str(r.emoji) for r in getattr(message, "reactions", [])}
 
     context_emojis = await get_contextual_emojis(
@@ -523,7 +618,8 @@ async def ensure_unique_image_prompt(
     api_key: str,
     text_model: str,
     api_url: str,
-    reply_text: str = ""
+    reply_text: str = "",
+    source_image_desc: str = ""
 ) -> str:
     """
     1. Ensures that if a user explicitly requested a specific visual subject,
@@ -565,7 +661,19 @@ async def ensure_unique_image_prompt(
             if is_same_bot and not requested_subject:
                 stale_self_subject = True
 
-    if not missing_requested_subject and not conflicting_prompts and not user_asked_topic_change:
+    clean_source_desc = ""
+    if source_image_desc:
+        desc_m = IMAGE_DESC_EXTRACT_REGEX.search(source_image_desc)
+        clean_source_desc = desc_m.group(1).strip() if desc_m else source_image_desc.strip()
+
+    is_remix_turn = bool(clean_source_desc and IMAGE_REMIX_REQ_REGEX.search(user_prompt or ""))
+    needs_remix_grounding = False
+    if is_remix_turn:
+        src_tokens = _normalize_tokens(clean_source_desc)
+        if src_tokens and (len(proposed_tokens & src_tokens) / float(max(1, min(len(src_tokens), 6)))) < 0.25:
+            needs_remix_grounding = True
+
+    if not missing_requested_subject and not conflicting_prompts and not user_asked_topic_change and not needs_remix_grounding:
         return img_prompt
 
     if missing_requested_subject:
@@ -577,7 +685,12 @@ async def ensure_unique_image_prompt(
 
     conflict_str = "\n".join(conflicting_prompts[:4]) if conflicting_prompts else "None"
     clean_reply_scene = _strip_conversational_filler_from_reply(reply_text)
-    if missing_requested_subject:
+    if needs_remix_grounding and clean_source_desc:
+        subject_directive = (
+            f"CRITICAL IMAGE-TO-IMAGE REMIX FIDELITY: The user is remixing this source image: '{clean_source_desc}'. "
+            f"Preserve the core subject, pose, and composition of the source image while applying the user's requested style or twist ('{user_prompt}')!\n"
+        )
+    elif missing_requested_subject:
         subject_directive = (
             f"CRITICAL USER REQUEST FIDELITY: The user explicitly asked for: '{requested_subject}'. "
             "You MUST depict ALL specific subjects, people, items, food, clothing, and actions requested by the user! "
@@ -779,7 +892,8 @@ async def synthesize_missing_image_prompt(
     api_key: str,
     text_model: str,
     api_url: str,
-    raw_history: list[dict] | None = None
+    raw_history: list[dict] | None = None,
+    source_image_desc: str = ""
 ) -> str | None:
     requested_subject = _extract_explicit_requested_subject(user_prompt, bot_name, raw_history)
     clean_reply_scene = _strip_conversational_filler_from_reply(reply_text)
@@ -794,13 +908,27 @@ async def synthesize_missing_image_prompt(
             if last_bot_prompt:
                 break
 
+    clean_source_desc = ""
+    if source_image_desc:
+        desc_m = IMAGE_DESC_EXTRACT_REGEX.search(source_image_desc)
+        clean_source_desc = desc_m.group(1).strip() if desc_m else source_image_desc.strip()
+
     prev_context_line = f"\nBot's previous image prompt (update/fix this if the user is correcting a detail): {last_bot_prompt}" if last_bot_prompt else ""
-    subject_clause = (
-        f"CRITICAL: The user explicitly asked for an image of: '{requested_subject}'. "
-        "Your visual prompt MUST depict that exact subject and all its requested details! "
-        if requested_subject
-        else "Depict the EXACT subject, character, props, and details the bot is presenting or fixing in its reply. "
-    )
+    if clean_source_desc:
+        prev_context_line += f"\nSource Image Being Remixed: {clean_source_desc}"
+
+    if clean_source_desc and IMAGE_REMIX_REQ_REGEX.search(user_prompt or ""):
+        subject_clause = (
+            f"CRITICAL IMAGE-TO-IMAGE REMIX: The user wants to remix/restyle the source image ('{clean_source_desc}') "
+            f"according to their instructions ('{user_prompt}'). Preserve the core subject/scene of the source image while applying the new style or twist! "
+        )
+    elif requested_subject:
+        subject_clause = (
+            f"CRITICAL: The user explicitly asked for an image of: '{requested_subject}'. "
+            "Your visual prompt MUST depict that exact subject and all its requested details! "
+        )
+    else:
+        subject_clause = "Depict the EXACT subject, character, props, and details the bot is presenting or fixing in its reply. "
 
     payload = {
         "model": text_model,
@@ -1081,3 +1209,55 @@ async def synthesize_missing_meme_spec(
     if fb_scene and (fb_top or fb_bot):
         return fb_scene, fb_top, fb_bot
     return None, "", ""
+
+
+async def transcribe_voice_attachment(
+    audio_bytes: bytes,
+    filename: str = "voice_note.ogg",
+    api_key: str = "",
+    bot_name: str = "Bot",
+    whisper_model: str = "openai/whisper-large-v3-turbo",
+) -> str:
+    """
+    Crown Jewel #3 — Bidirectional Voice (Human Discord Voice Note STT via Whisper):
+    Transcribes `.ogg`/`.mp3`/`.wav`/`.m4a` voice attachments using DeepInfra's
+    OpenAI-compatible `/v1/openai/audio/transcriptions` endpoint (`openai/whisper-large-v3-turbo`),
+    returning the clean transcribed text string (or `""` on failure).
+    """
+    if not audio_bytes or not api_key:
+        return ""
+
+    stt_url = "https://api.deepinfra.com/v1/openai/audio/transcriptions"
+    circuit_key = f"transcriptions:{whisper_model}"
+    clean_fname = os.path.basename(filename or "voice_note.ogg")
+    start_m = time.monotonic()
+
+    def _post_multipart():
+        return get_http_session().post(
+            stt_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (clean_fname, audio_bytes)},
+            data={"model": whisper_model},
+            timeout=(8, 25),
+        )
+
+    try:
+        res = await asyncio.to_thread(_post_multipart)
+        elapsed = max(0.001, time.monotonic() - start_m)
+        if res is not None and res.status_code == 200:
+            record_model_outcome(circuit_key, success=True, elapsed_sec=elapsed)
+            data = res.json()
+            transcript = str(data.get("text", "") if isinstance(data, dict) else "").strip()
+            transcript = WHITESPACE_COLLAPSE_REGEX.sub(" ", transcript)
+            if transcript:
+                print(f"[{bot_name}] [WHISPER STT] Transcribed voice note ({len(audio_bytes)} bytes): '{transcript[:90]}'")
+                return transcript
+        else:
+            record_model_outcome(circuit_key, success=False, elapsed_sec=elapsed)
+            status_c = getattr(res, "status_code", "ERR")
+            print(f"[{bot_name}] [WARN] Whisper STT returned {status_c}")
+    except Exception as e:
+        elapsed = max(0.001, time.monotonic() - start_m)
+        record_model_outcome(circuit_key, success=False, elapsed_sec=elapsed)
+        print(f"[{bot_name}] [WARN] Whisper STT failed: {e}")
+    return ""

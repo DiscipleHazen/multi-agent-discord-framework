@@ -1,6 +1,7 @@
 import os
 import re
 import html
+import math
 import asyncio
 import tempfile
 import threading
@@ -37,6 +38,7 @@ CLAUSE_SPLIT_PIVOT_REGEX = re.compile(
 
 VALID_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".apng")
 VALID_VID_EXTS = (".mp4", ".mov", ".webm", ".avi")
+VALID_AUDIO_EXTS = (".ogg", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".opus")
 
 GIPHY_SPAM_MISMATCH_TERMS = frozenset({
     "birthday", "bday", "voting", "ballot", "election", "hanukkah",
@@ -416,6 +418,67 @@ def _convert_pil_frame_to_rgb(img: Image.Image, apply_exif: bool = False) -> Ima
     return img.convert("RGB")
 
 
+def compute_dhash_64(image_bytes_or_pil: bytes | Image.Image) -> int | None:
+    """
+    Upgrade #1 — 64-Bit Perceptual Difference Hash (dHash):
+    Resizes image to 9x8 grayscale in ~0.1ms and compares adjacent horizontal pixels
+    I(x, y) > I(x + 1, y) to pack an unsigned 64-bit integer bitmask.
+    """
+    if not image_bytes_or_pil:
+        return None
+    try:
+        if isinstance(image_bytes_or_pil, (bytes, bytearray)):
+            with Image.open(BytesIO(image_bytes_or_pil)) as raw_im:
+                gray = raw_im.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+                pixels = list(gray.getdata())
+        elif isinstance(image_bytes_or_pil, Image.Image):
+            gray = image_bytes_or_pil.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+            pixels = list(gray.getdata())
+        else:
+            return None
+
+        bits = 0
+        for row in range(8):
+            row_offset = row * 9
+            for col in range(8):
+                bits = (bits << 1) | (1 if pixels[row_offset + col] > pixels[row_offset + col + 1] else 0)
+        return bits
+    except Exception:
+        return None
+
+
+def dhash_hamming_distance(hash_a: int | None, hash_b: int | None) -> int:
+    """
+    Computes the bitwise XOR Hamming distance between two 64-bit perceptual dHashes.
+    A distance <= 5 indicates perceptually identical/re-compressed media.
+    """
+    if hash_a is None or hash_b is None:
+        return 64
+    return int(hash_a ^ hash_b).bit_count()
+
+
+def _compute_shannon_entropy(img_or_gray: Image.Image) -> float:
+    """
+    Upgrade #2 — Discrete 8-Bit Luminance Shannon Entropy:
+      H(I) = - sum_{k=0}^{255} p_k * log2(p_k)
+    Measures visual information density (0.0 for flat solid frames up to 8.0 bits for rich detail).
+    """
+    try:
+        gray = img_or_gray if img_or_gray.mode == "L" else img_or_gray.convert("L")
+        hist = gray.histogram()
+        total = float(sum(hist))
+        if total <= 0:
+            return 0.0
+        ent = 0.0
+        for count in hist:
+            if count > 0:
+                p = count / total
+                ent -= p * math.log2(p)
+        return ent
+    except Exception:
+        return 0.0
+
+
 def _frame_thumb_signature(img: Image.Image) -> list[int]:
     """Computes a fast 16x16 grayscale thumbnail vector for perceptual motion comparison."""
     return list(img.convert("L").resize((16, 16), Image.Resampling.BILINEAR).getdata())
@@ -522,28 +585,53 @@ def preprocess_image_bytes(image_bytes: bytes, max_dim: int = 1024) -> bytes | N
                     rgb_img = _convert_pil_frame_to_rgb(img, apply_exif=True)
                     return _build_multi_frame_grid([rgb_img], max_dim=max_dim)
 
-                if n_frames >= 4:
-                    raw_indices = [
-                        max(0, int(n_frames * 0.10)),
-                        int(n_frames * 0.36),
-                        int(n_frames * 0.64),
-                        min(n_frames - 1, int(n_frames * 0.90))
-                    ]
-                else:
-                    raw_indices = list(range(n_frames))
-
-                target_indices = []
-                for idx in raw_indices:
-                    if idx not in target_indices:
-                        target_indices.append(idx)
-
+                # Upgrade #2 — Temporal Action-Flux (L1) + Shannon Entropy Keyframe Selection
                 sampled_frames = []
-                for f_idx in target_indices:
-                    try:
-                        img.seek(f_idx)
-                        sampled_frames.append(_convert_pil_frame_to_rgb(img, apply_exif=False))
-                    except Exception:
-                        continue
+                if n_frames <= 4:
+                    for f_idx in range(n_frames):
+                        try:
+                            img.seek(f_idx)
+                            sampled_frames.append(_convert_pil_frame_to_rgb(img, apply_exif=False))
+                        except Exception:
+                            continue
+                else:
+                    # Divide timeline into 4 chronological buckets and pick highest (Entropy + L1 Action-Flux) frame per bucket
+                    bucket_edges = [
+                        (max(0, int(n_frames * 0.04)), max(1, int(n_frames * 0.26))),
+                        (int(n_frames * 0.26), max(int(n_frames * 0.26) + 1, int(n_frames * 0.50))),
+                        (int(n_frames * 0.50), max(int(n_frames * 0.50) + 1, int(n_frames * 0.74))),
+                        (int(n_frames * 0.74), min(n_frames, max(int(n_frames * 0.74) + 1, int(n_frames * 0.96)))),
+                    ]
+                    prev_sig: list[int] | None = None
+                    for b_start, b_end in bucket_edges:
+                        mid = (b_start + b_end) // 2
+                        candidates_idx = sorted({b_start, mid, max(b_start, b_end - 1)})
+                        best_frame = None
+                        best_sig = None
+                        best_score = -1.0
+                        for c_idx in candidates_idx:
+                            if c_idx >= n_frames:
+                                continue
+                            try:
+                                img.seek(c_idx)
+                                rgb_f = _convert_pil_frame_to_rgb(img, apply_exif=False)
+                                sig = _frame_thumb_signature(rgb_f)
+                                ent = _compute_shannon_entropy(rgb_f)
+                                flux = (
+                                    (sum(abs(a - b) for a, b in zip(prev_sig, sig)) / 256.0)
+                                    if prev_sig is not None
+                                    else 6.0
+                                )
+                                score = (ent * 2.5) + min(20.0, flux * 0.85)
+                                if score > best_score:
+                                    best_score = score
+                                    best_frame = rgb_f
+                                    best_sig = sig
+                            except Exception:
+                                continue
+                        if best_frame is not None:
+                            sampled_frames.append(best_frame)
+                            prev_sig = best_sig
 
                 if not sampled_frames:
                     img.seek(0)
@@ -618,13 +706,15 @@ def extract_video_frame_bytes(raw_bytes: bytes, suffix: str = ".mp4") -> bytes |
                         cand_pil = Image.fromarray(rgb_arr)
                         cand_sig = _frame_thumb_signature(cand_pil)
 
-                        # Reward perceptual difference from the previous panel so the storyboard shows motion
+                        # Upgrade #2: Combine Shannon Entropy H(I) + Temporal L1 Action-Flux + Laplacian Sharpness
+                        shannon_h = _compute_shannon_entropy(cand_pil)
+                        entropy_bonus = shannon_h * 3.0
                         motion_bonus = 0.0
                         if prev_thumb_sig is not None:
                             diff_val = sum(abs(a - b) for a, b in zip(prev_thumb_sig, cand_sig)) / 256.0
-                            motion_bonus = min(18.0, diff_val * 0.8)
+                            motion_bonus = min(20.0, diff_val * 0.85)
 
-                        score = (std_contrast + sharp_bonus + motion_bonus) * lum_penalty
+                        score = (std_contrast + sharp_bonus + entropy_bonus + motion_bonus) * lum_penalty
                         if score > best_local_score:
                             best_local_score = score
                             best_local_pil = cand_pil
@@ -841,6 +931,77 @@ async def fetch_image_bytes_from_message(message: discord.Message) -> bytes | No
     return None
 
 
+def is_audio_voice_attachment(message: discord.Message) -> bool:
+    """
+    Crown Jewel #3 — Bidirectional Voice Note Detector:
+    Returns True if the Discord message contains a human voice message or audio file attachment
+    (.ogg, .mp3, .wav, .m4a, .flac, .opus) so the bot can transcribe it via Whisper STT.
+    """
+    for att in getattr(message, "attachments", []) or []:
+        ctype = (getattr(att, "content_type", "") or "").lower()
+        fname = (getattr(att, "filename", "") or "").lower()
+        if ctype.startswith("audio/") or fname.endswith(VALID_AUDIO_EXTS):
+            return True
+    return False
+
+
+async def fetch_audio_bytes_from_message(message: discord.Message) -> tuple[bytes | None, str]:
+    """
+    Crown Jewel #3 — Downloads the first valid audio/voice-note attachment from `message`.
+    Returns `(audio_bytes, filename)` or `(None, "")`.
+    """
+    for att in getattr(message, "attachments", []) or []:
+        if att.size and att.size > MAX_DOWNLOAD_BYTES:
+            continue
+        ctype = (getattr(att, "content_type", "") or "").lower()
+        fname = (getattr(att, "filename", "") or "voice_note.ogg").lower()
+        if ctype.startswith("audio/") or fname.endswith(VALID_AUDIO_EXTS):
+            try:
+                raw_audio = await att.read()
+                if raw_audio and len(raw_audio) > 128:
+                    return raw_audio, fname
+            except Exception:
+                continue
+    return None, ""
+
+
+def _measure_band_edge_saliency(img: Image.Image, y_top: int, y_bottom: int) -> float:
+    """
+    Upgrade #3 — Laplacian Edge-Energy Saliency Estimator:
+    Computes the mean edge-gradient energy inside horizontal band `[y_top, y_bottom]`
+    using OpenCV Laplacian variance (with PIL grayscale variance fallback) so single-caption
+    memes and vertical margins avoid covering high-detail subject faces.
+    """
+    w, h = img.size
+    y0 = max(0, min(h - 2, int(y_top)))
+    y1 = max(y0 + 2, min(h, int(y_bottom)))
+    try:
+        # Focus on the central 70% horizontal region where faces/subjects sit
+        x0 = int(w * 0.15)
+        x1 = max(x0 + 4, int(w * 0.85))
+        crop_gray = img.crop((x0, y0, x1, y1)).convert("L").resize((64, 24), Image.Resampling.BILINEAR)
+        pixels = list(crop_gray.getdata())
+        # Compute discrete 2D Laplacian energy sum |4*c - l - r - u - d|
+        energy = 0.0
+        count = 0
+        for r in range(1, 23):
+            row_off = r * 64
+            for c in range(1, 63):
+                center = pixels[row_off + c]
+                lap = abs(
+                    4 * center
+                    - pixels[row_off + c - 1]
+                    - pixels[row_off + c + 1]
+                    - pixels[row_off - 64 + c]
+                    - pixels[row_off + 64 + c]
+                )
+                energy += lap
+                count += 1
+        return (energy / float(max(1, count)))
+    except Exception:
+        return 0.0
+
+
 def _sanitize_meme_caption_text(text_str: str) -> str:
     """Strips any literal placeholder labels or leaked bracket tags before rendering onto an image."""
     if not text_str:
@@ -993,6 +1154,22 @@ def render_meme_captions(image_bytes: bytes, top_text: str = "", bottom_text: st
                         stroke_fill=(0, 0, 0, 255)
                     )
                     y_cursor += line_heights[idx]
+
+            # Upgrade #3 — Laplacian Edge-Energy Saliency Avoidance:
+            # If only one short caption exists, place it in whichever band (top 22% vs bottom 22%)
+            # has lower subject/face edge energy!
+            if clean_top and not clean_bottom:
+                top_saliency = _measure_band_edge_saliency(img, 0, int(h * 0.22))
+                bot_saliency = _measure_band_edge_saliency(img, int(h * 0.78), h)
+                if top_saliency > (bot_saliency * 1.35 + 6.0):
+                    clean_bottom = clean_top
+                    clean_top = ""
+            elif clean_bottom and not clean_top:
+                top_saliency = _measure_band_edge_saliency(img, 0, int(h * 0.22))
+                bot_saliency = _measure_band_edge_saliency(img, int(h * 0.78), h)
+                if bot_saliency > (top_saliency * 1.35 + 6.0):
+                    clean_top = clean_bottom
+                    clean_bottom = ""
 
             if clean_top:
                 _wrap_and_draw(clean_top, is_top=True)

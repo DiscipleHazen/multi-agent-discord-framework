@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord Multi-Agent AI — Cognitive Control Plane & SRE Supervisor</title>
+    <style>
+    :root, [data-theme="cyan"] {
+      --bg-base: #06080d;
+      --bg-surface: #0c1018;
+      --bg-panel: #101622;
+      --bg-card: #151d2c;
+      --bg-elevated: #1c2638;
+      --bg-input: #080b11;
+      --border: #232f46;
+      --border-bright: #344666;
+      --text-main: #f8fafc;
+      --text-secondary: #cbd5e1;
+      --text-muted: #8b9bb4;
+      --accent: #00e5ff;
+      --accent-soft: rgba(0, 229, 255, 0.14);
+      --accent-glow: rgba(0, 229, 255, 0.32);
+      --accent-hover: #33ebff;
+      --emerald: #00e676;
+      --emerald-soft: rgba(0, 230, 118, 0.14);
+      --sky: #38bdf8;
+      --amber: #ffab00;
+      --amber-soft: rgba(255, 171, 0, 0.15);
+      --crimson: #ff3d57;
+      --crimson-soft: rgba(255, 61, 87, 0.16);
+      --purple: #b388ff;
+      --header-grad: linear-gradient(180deg, #0d131f 0%, #090d15 100%);
+    }
+    [data-theme="amber"] {
+      --bg-base: #08080a;
+      --bg-surface: #101014;
+      --bg-panel: #14141a;
+      --bg-card: #1b1b23;
+      --bg-elevated: #252530;
+      --bg-input: #0a0a0d;
+      --border: #2c2c3a;
+      --border-bright: #434358;
+      --text-main: #fafafa;
+      --text-secondary: #d4d4d8;
+      --text-muted: #9ca3af;
+      --accent: #ff9100;
+      --accent-soft: rgba(255, 145, 0, 0.15);
+      --accent-glow: rgba(255, 145, 0, 0.34);
+      --accent-hover: #ffab40;
+      --emerald: #10b981;
+      --emerald-soft: rgba(16, 185, 129, 0.15);
+      --sky: #38bdf8;
+      --amber: #fbbf24;
+      --amber-soft: rgba(251, 191, 36, 0.16);
+      --crimson: #f43f5e;
+      --crimson-soft: rgba(244, 63, 94, 0.17);
+      --purple: #c084fc;
+      --header-grad: linear-gradient(180deg, #151419 0%, #0c0c0f 100%);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-base);
+      color: var(--text-main);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: clamp(14.5px, 0.92vw, 16px);
+      line-height: 1.5;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, .mono {
+      font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    header {
+      background: var(--header-grad);
+      border-bottom: 1px solid var(--border);
+      padding: 14px clamp(18px, 2.2vw, 36px);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(12px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      font-size: clamp(16px, 1.15vw, 19px);
+      letter-spacing: 0.03em;
+      color: var(--text-main);
+    }
+    .brand-mark {
+      width: 11px;
+      height: 22px;
+      border-radius: 3px;
+      background: var(--accent);
+      box-shadow: 0 0 14px var(--accent-glow);
+      display: inline-block;
+    }
+    .brand-sub {
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-glow);
+      letter-spacing: 0.05em;
+    }
+    .theme-switch {
+      display: inline-flex;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .theme-chip {
+      background: transparent;
+      color: var(--text-muted);
+      border: none;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .theme-chip.active {
+      background: var(--accent);
+      color: #05080d;
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11.5px;
+      padding: 4px 11px;
+      border-radius: 6px;
+      background: var(--emerald-soft);
+      color: var(--emerald);
+      border: 1px solid rgba(0, 230, 118, 0.4);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .status-pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+    }
+    .status-pill.disconnected {
+      background: var(--crimson-soft);
+      color: var(--crimson);
+      border-color: rgba(255, 61, 87, 0.45);
+    }
+    .status-pill.disconnected::before {
+      background: var(--crimson);
+      box-shadow: 0 0 8px var(--crimson);
+    }
+    .kpi-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .kpi-box {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-top: 2px solid var(--accent);
+      border-radius: 8px;
+      padding: 8px 16px;
+      min-width: 148px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    }
+    .kpi-label {
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 2px;
+    }
+    .kpi-val {
+      font-size: clamp(17px, 1.2vw, 21px);
+      font-weight: 800;
+      color: var(--text-main);
+      font-variant-numeric: tabular-nums;
+    }
+    .nav-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 10px clamp(18px, 2.2vw, 36px) 0;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-surface);
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid transparent;
+      border-bottom: 3px solid transparent;
+      padding: 11px 18px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: clamp(13.5px, 0.9vw, 15px);
+      letter-spacing: 0.01em;
+      border-radius: 8px 8px 0 0;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      background: var(--bg-panel);
+      border-color: var(--border);
+      border-bottom-color: var(--accent);
+    }
+    /* Fluid Full-Viewport Container (scales cleanly from 1080p to 1440p/4K ultrawide) */
+    main {
+      padding: clamp(18px, 2vw, 30px) clamp(18px, 2.2vw, 36px);
+      width: 100%;
+      max-width: 98vw;
+      margin: 0 auto;
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 20px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 18px;
+    }
+    @media (max-width: 1200px) { .grid-2 { grid-template-columns: 1fr; } }
+    .panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    .panel-title {
+      font-size: clamp(15.5px, 1.05vw, 17.5px);
+      font-weight: 800;
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--text-main);
+      letter-spacing: -0.01em;
+    }
+    .bot-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--border-bright);
+      border-radius: 10px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+    }
+    .bot-card:hover {
+      border-color: var(--border-bright);
+      border-top-color: var(--accent);
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+    }
+    .bot-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 16.5px;
+      font-weight: 800;
+    }
+    .badge {
+      font-size: 11.5px;
+      font-weight: 800;
+      padding: 4px 10px;
+      border-radius: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-variant-numeric: tabular-nums;
+    }
+    .badge.RUNNING, .badge.CLOSED {
+      background: var(--emerald-soft);
+      color: var(--emerald);
+      border: 1px solid rgba(0, 230, 118, 0.45);
+      box-shadow: 0 0 12px rgba(0, 230, 118, 0.18);
+    }
+    .badge.BACKOFF, .badge.HALF-OPEN {
+      background: var(--amber-soft);
+      color: var(--amber);
+      border: 1px solid rgba(255, 171, 0, 0.45);
+    }
+    .badge.QUARANTINED, .badge.OPEN {
+      background: var(--crimson-soft);
+      color: var(--crimson);
+      border: 1px solid rgba(255, 61, 87, 0.5);
+      box-shadow: 0 0 12px rgba(255, 61, 87, 0.22);
+    }
+    .badge.STOPPED {
+      background: rgba(139, 155, 180, 0.12);
+      color: var(--text-muted);
+      border: 1px solid rgba(139, 155, 180, 0.28);
+    }
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      padding: 11px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+    .metrics-row strong {
+      font-size: 15px;
+      color: var(--text-main);
+      font-family: 'JetBrains Mono', Consolas, monospace;
+    }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button.btn {
+      background: var(--bg-elevated);
+      color: var(--text-main);
+      border: 1px solid var(--border-bright);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 13.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.14s;
+      letter-spacing: 0.01em;
+    }
+    button.btn:hover {
+      background: var(--border-bright);
+      transform: translateY(-1px);
+    }
+    button.btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 5px 11px;
+      font-size: 12px;
+    }
+    button.btn-ghost:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    button.btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #05080d;
+      font-weight: 800;
+      box-shadow: 0 0 14px var(--accent-soft);
+    }
+    button.btn-primary:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 0 18px var(--accent-glow);
+    }
+    button.btn-success {
+      background: var(--emerald-soft);
+      border-color: var(--emerald);
+      color: var(--emerald);
+    }
+    button.btn-success:hover {
+      background: var(--emerald);
+      color: #05080d;
+    }
+    button.btn-danger {
+      background: var(--crimson-soft);
+      border-color: var(--crimson);
+      color: var(--crimson);
+    }
+    button.btn-danger:hover {
+      background: var(--crimson);
+      color: #fff;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--text-muted);
+      font-weight: 800;
+      text-transform: uppercase;
+      font-size: 11.5px;
+      letter-spacing: 0.06em;
+      background: rgba(0, 0, 0, 0.25);
+    }
+    tr:hover td { background: rgba(255, 255, 255, 0.025); }
+    input[type="text"], input[type="number"], select, textarea {
+      background: var(--bg-input);
+      color: var(--text-main);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 12px;
+      font-size: 14px;
+      width: 100%;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 14px;
+      align-items: end;
+    }
+    #socialCanvas {
+      width: 100%;
+      height: clamp(460px, 54vh, 680px);
+      background: radial-gradient(circle at center, #111927 0%, #06080d 100%);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: grab;
+    }
+    #socialCanvas:active { cursor: grabbing; }
+    .log-box {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      height: clamp(340px, 42vh, 520px);
+      overflow-y: auto;
+      padding: 14px;
+      font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+      font-size: 13.5px;
+      line-height: 1.55;
+    }
+    .log-line { margin-bottom: 5px; word-break: break-word; color: var(--text-secondary); }
+    .log-line.ERROR { color: var(--crimson); font-weight: 600; }
+    .log-line.WARN { color: var(--amber); }
+    .xray-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      padding: 13px 16px;
+      margin-bottom: 10px;
+    }
+    .thought-bubble {
+      color: var(--accent);
+      font-style: italic;
+      margin-top: 6px;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-glow);
+      padding: 7px 11px;
+      border-radius: 6px;
+    }
+    .ret-bar {
+      width: 85px;
+      height: 8px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    .ret-fill { height: 100%; background: var(--emerald); }
+    .toast {
+      position: fixed;
+      bottom: 22px;
+      right: 22px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--accent);
+      color: var(--text-main);
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      display: none;
+      z-index: 999;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-mark"></span><span>MULTI-AGENT CONTROL PLANE</span><span class="brand-sub">v4.1 SRE</span>
+      <span id="sseStatus" class="status-pill">LIVE TELEMETRY</span>
+      <div class="theme-switch" title="Switch Dashboard Aesthetic"><button id="themeBtnCyan" class="theme-chip active" onclick="setAestheticTheme('cyan')">OBSIDIAN CYAN</button><button id="themeBtnAmber" class="theme-chip" onclick="setAestheticTheme('amber')">CARBON AMBER</button></div><button id="tunnelBtn" class="btn btn-ghost" onclick="togglePublicTunnel()" title="Start/Stop zero-install public HTTPS tunnel for remote Discord Admins">START PUBLIC TUNNEL</button><button id="copyMagicBtn" class="btn btn-primary" style="display:none;padding:5px 11px;font-size:12px;" onclick="copyPublicMagicLink()">COPY ADMIN LINK</button><button class="btn btn-ghost" onclick="promptAdminToken()">AUTH TOKEN</button>
+    </div>
+    <div class="kpi-strip">
+      <div class="kpi-box">
+        <div class="kpi-label">Supervised Bots</div>
+        <div class="kpi-val" id="kpiBots">0 / 0</div>
+      </div>
+      <div class="kpi-box">
+        <div class="kpi-label">Total Tokens</div>
+        <div class="kpi-val" id="kpiTokens">0</div>
+      </div>
+      <div class="kpi-box">
+        <div class="kpi-label">Est. DeepInfra Cost</div>
+        <div class="kpi-val" id="kpiCost">$0.0000</div>
+      </div>
+      <div class="kpi-box">
+        <div class="kpi-label">Vision dHash Cache</div>
+        <div class="kpi-val" id="kpiDhash">0 hits</div>
+      </div>
+    </div>
+  </header>
+
+  <nav class="nav-tabs">
+    <button class="tab-btn active" onclick="switchTab('overview')">Fleet & FinOps</button>
+    <button class="tab-btn" onclick="switchTab('social')">Social Graph</button>
+    <button class="tab-btn" onclick="switchTab('xray')">Subconscious X-Ray</button>
+    <button class="tab-btn" onclick="switchTab('memory')">Memory Salience</button>
+    <button class="tab-btn" onclick="switchTab('tuning')">Channel & Director</button>
+    <button class="tab-btn" onclick="switchTab('studio')">Bot Studio</button>
+    <button class="tab-btn" onclick="switchTab('env')">API Keys & .env</button>
+  </nav>
+
+  <main>
+    <!-- TAB 1: FLEET & FINOPS MATRIX -->
+    <section id="tab-overview" class="tab-pane active">
+      <div class="panel">
+        <div class="panel-title">
+          <span>Process Supervisor & Resource Telemetry</span>
+          <div class="btn-row">
+            <button class="btn btn-success" onclick="botAction('__ALL__', 'start')">Start All</button>
+            <button class="btn" onclick="botAction('__ALL__', 'restart')">Rolling Restart All</button>
+            <button class="btn btn-danger" onclick="botAction('__ALL__', 'stop')">Stop All</button>
+            <button class="btn" onclick="fetchState()">Refresh</button>
+          </div>
+        </div>
+        <div id="botCardsGrid" class="grid-3"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title"><span>Model Latency & Circuit-Breaker Matrix</span></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Model Endpoint</th>
+                <th>Circuit</th>
+                <th>EWMA Latency</th>
+                <th>Err Rate</th>
+                <th>Calls</th>
+                <th>Tokens</th>
+                <th>Est. Spend</th>
+              </tr>
+            </thead>
+            <tbody id="modelMatrixBody"></tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title"><span>Live IPC & Supervisor Log Stream</span></div>
+          <div id="logConsole" class="log-box"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: FORCE-DIRECTED SOCIAL GRAPH (#9) -->
+    <section id="tab-social" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title">
+            <span>Force-Directed Signed Social Graph</span>
+            <span style="font-size:11.5px;color:var(--text-muted);">Drag nodes • Emerald = Inner Circle (≥+45) • Sky = Ally • Crimson/Amber = Rival/Foil</span>
+          </div>
+          <canvas id="socialCanvas" width="900" height="470"></canvas>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>Selected Node Dossier & Balance Inspector</span></div>
+          <div id="nodeInspectorBox" style="color:var(--text-muted);padding:8px 0;">
+            Click any human or bot node on the physics canvas to inspect their live Affinity standing, Disposition Tier, Archetype, and Catalyst.
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:12px 0;" />
+          <div class="panel-title"><span>Signed Relationship Edges</span></div>
+          <div style="max-height:310px;overflow-y:auto;">
+            <table>
+              <thead>
+                <tr><th>Source ➔ Target</th><th>Affinity</th><th>Tier / Archetype</th><th>Catalyst</th></tr>
+              </thead>
+              <tbody id="edgesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: SUBCONSCIOUS X-RAY & ROOM BLACKBOARD (#10) -->
+    <section id="tab-xray" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title"><span>Subconscious [THOUGHT:] Stream</span></div>
+          <div id="xrayStreamBox" style="max-height:520px;overflow-y:auto;"></div>
+        </div>
+        <div>
+          <div class="panel">
+            <div class="panel-title"><span>Active Room Blackboard & TTL Props</span></div>
+            <div id="roomBlackboardBox"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title"><span>Episodic Session Chapters</span></div>
+            <div id="episodicChaptersBox" style="max-height:240px;overflow-y:auto;"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: MEMORY SALIENCE & EBBINGHAUS DECAY CRUD INSPECTOR (#11) -->
+    <section id="tab-memory" class="tab-pane">
+      <div class="panel">
+        <div class="panel-title"><span>Add or Pin Memory Fact (Zero-PII Firewall Active)</span></div>
+        <div class="form-grid">
+          <div>
+            <label class="kpi-label">Memory Store</label>
+            <select id="memStoreSelect">
+              <option value="user_profiles">user_profiles.json (Member/Bot)</option>
+              <option value="long_term_memory">long_term_memory.json (Server Lore)</option>
+              <option value="general_knowledge">general_knowledge.json (General Facts)</option>
+            </select>
+          </div>
+          <div>
+            <label class="kpi-label">Owner / Username (for User Profile)</label>
+            <input type="text" id="memOwnerInput" placeholder="e.g., Alex" />
+          </div>
+          <div>
+            <label class="kpi-label">Category</label>
+            <select id="memCatSelect">
+              <option value="CORE">CORE (S:95 • Immune)</option>
+              <option value="BOUNDARY">BOUNDARY (S:96 • Immune)</option>
+              <option value="PROJECT">PROJECT (τ=120d)</option>
+              <option value="PREF" selected>PREF (τ=120d)</option>
+              <option value="HABIT">HABIT (τ=35d)</option>
+              <option value="LORE">LORE (τ=35d)</option>
+              <option value="SITUATIONAL">SITUATIONAL (τ=7d)</option>
+            </select>
+          </div>
+          <div>
+            <label class="kpi-label">Salience (1 - 100)</label>
+            <input type="number" id="memSalInput" value="80" min="1" max="100" />
+          </div>
+          <div style="grid-column: span 2;">
+            <label class="kpi-label">Fact Text (No surnames, street addresses, emails, phones, or card numbers)</label>
+            <input type="text" id="memTextInput" placeholder="e.g., Prefers not to be called sweetie | Building a multi-agent Discord framework" />
+          </div>
+          <div>
+            <button class="btn btn-primary" style="width:100%;padding:7px;" onclick="submitNewMemory()">💾 Save Fact</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <span>Salience & Ebbinghaus Retention R(t) Inspector</span>
+          <input type="text" id="memSearchInput" placeholder="Filter memories by user, category, or keyword..." style="max-width:320px;" oninput="renderMemoryTable()" />
+        </div>
+        <div style="max-height:460px;overflow-y:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Store / Owner</th>
+                <th>Salience & Cat</th>
+                <th>Ebbinghaus R(t)</th>
+                <th>Fact Text</th>
+                <th>Date / Recalls</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="memoryTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: CHANNEL SLIDERS & DIRECTOR MODE (#12 & #13) -->
+    <section id="tab-tuning" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title"><span>Per-Channel Parameters & Capability Toggles</span></div>
+          <div class="form-grid" style="margin-bottom:12px;">
+            <div>
+              <label class="kpi-label">Discord Channel ID</label>
+              <input type="text" id="tuneChannelId" placeholder="Enter Channel ID (or select below)" />
+            </div>
+            <div>
+              <label class="kpi-label">Temperature (0.1 - 1.5)</label>
+              <input type="number" id="tuneTemp" step="0.05" min="0.1" max="1.5" value="0.78" />
+            </div>
+            <div>
+              <label class="kpi-label">Chime-In Chance (0.0 - 1.0)</label>
+              <input type="number" id="tuneResp" step="0.01" min="0.0" max="1.0" value="0.05" />
+            </div>
+            <div>
+              <label class="kpi-label">Emoji Chance (0.0 - 1.0)</label>
+              <input type="number" id="tuneEmoji" step="0.05" min="0.0" max="1.0" value="0.45" />
+            </div>
+            <div>
+              <label class="kpi-label">Idle Post Interval (mins)</label>
+              <input type="number" id="tuneRandom" step="5" min="0" value="0" />
+            </div>
+            <div>
+              <button class="btn btn-primary" style="width:100%;padding:7px;" onclick="saveChannelTuning()">⚡ Apply to Channel</button>
+            </div>
+          </div>
+          <div id="existingChannelsBox"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title"><span>Director Mode — Stage Prompt, Room Prop & Hook Injector</span></div>
+          <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">
+            Inject live world events, stage directions, 5-turn physical room props (Crown Jewel #2), or unresolved check-in hooks (Crown Jewel #5) directly into <code>_room_state</code>!
+          </p>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            <div>
+              <label class="kpi-label">Target Channel ID (0 = Global Default)</label>
+              <input type="text" id="dirChannelId" value="0" />
+            </div>
+            <div>
+              <label class="kpi-label">Active Room Topic (3 - 8 words)</label>
+              <input type="text" id="dirTopic" placeholder="e.g., Late-night C++ debugging and synthwave" />
+            </div>
+            <div>
+              <label class="kpi-label">Room Emotional Vibe</label>
+              <input type="text" id="dirVibe" placeholder="e.g., Cozy & chaotic banter" />
+            </div>
+            <div>
+              <label class="kpi-label">Place Physical Room Prop (5-Turn TTL Object Permanence)</label>
+              <input type="text" id="dirProp" placeholder="e.g., A steaming plate of whole-pod edamame on the table" />
+            </div>
+            <div>
+              <label class="kpi-label">Plant Unfinished Business Hook (Proactive Idle Check-In)</label>
+              <input type="text" id="dirHook" placeholder="e.g., Ask how the discrete math exam prep is going" />
+            </div>
+            <button class="btn btn-success" style="padding:8px;" onclick="injectDirectorStage()">🎬 Inject Stage Direction Into Room Blackboard</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <!-- TAB 6: BOT STUDIO, VISUAL CONFIG EDITOR ([E]) & CREATE NEW BOT WIZARD ([C]) -->
+    <section id="tab-studio" class="tab-pane">
+      <div class="grid-2">
+        <!-- [C] CREATE NEW BOT WIZARD -->
+        <div class="panel">
+          <div class="panel-title"><span>Create New Bot (Generates bots/<name>.py & Saves Token)</span></div>
+          <div class="form-grid" style="margin-bottom:10px;">
+            <div>
+              <label class="kpi-label">Bot Name (e.g. ServerBot)</label>
+              <input type="text" id="newBotName" placeholder="e.g., ServerBot" />
+            </div>
+            <div>
+              <label class="kpi-label">Discord Bot Token (Saved to .env)</label>
+              <input type="text" id="newBotToken" placeholder="Paste Discord Bot Token..." />
+            </div>
+            <div>
+              <label class="kpi-label">Trigger Keywords (comma-separated)</label>
+              <input type="text" id="newBotKeywords" placeholder="e.g., serverbot, sb" />
+            </div>
+            <div>
+              <label class="kpi-label">Primary Text Model</label>
+              <input type="text" id="newBotTextModel" value="Qwen/Qwen3-235B-A22B-Instruct-2507" />
+            </div>
+          </div>
+          <div style="margin-bottom:10px;">
+            <label class="kpi-label">System Prompt Identity &amp; Character Bio</label>
+            <textarea id="newBotPrompt" rows="5" placeholder="Describe the bot's personality, speech style, quirks, and role in the server..." style="width:100%;background:#0b111e;color:var(--text-main);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12.5px;"></textarea>
+          </div>
+          <div class="form-grid" style="margin-bottom:10px;">
+            <div><label class="kpi-label">Temperature</label><input type="number" id="newBotTemp" step="0.05" value="0.75" /></div>
+            <div><label class="kpi-label">Chime-In Chance</label><input type="number" id="newBotResp" step="0.01" value="0.01" /></div>
+            <div><label class="kpi-label">Emoji Chance</label><input type="number" id="newBotEmoji" step="0.05" value="0.35" /></div>
+            <div><label class="kpi-label">Idle Post (mins)</label><input type="number" id="newBotIdle" step="5" value="0" /></div>
+          </div>
+          <div class="btn-row" style="margin-bottom:12px;align-items:center;">
+            <label><input type="checkbox" id="newBotVision" checked /> Vision</label>
+            <label><input type="checkbox" id="newBotImage" checked /> Image/Meme Gen</label>
+            <label><input type="checkbox" id="newBotGifs" checked /> GIFs</label>
+            <label><input type="checkbox" id="newBotVoice" /> Voice TTS</label>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-success" onclick="createNewBotWizard(true)">🚀 Create Bot &amp; Start Immediately</button>
+            <button class="btn btn-primary" onclick="createNewBotWizard(false)">💾 Create Bot Script Only</button>
+          </div>
+        </div>
+
+        <!-- [E] VISUAL BOT CONFIG EDITOR (Replaces bot_editor.py) -->
+        <div class="panel">
+          <div class="panel-title">
+            <span>Visual Bot Configuration Editor</span>
+            <select id="studioBotSelect" style="width:210px;" onchange="loadBotIntoStudio(this.value)">
+              <option value="">-- Select Bot to Edit --</option>
+            </select>
+          </div>
+          <div class="form-grid" style="margin-bottom:10px;">
+            <div>
+              <label class="kpi-label">Selected Bot</label>
+              <input type="text" id="studioBotNameInput" readonly placeholder="Select a bot above" />
+            </div>
+            <div>
+              <label class="kpi-label">Trigger Keywords (comma-separated)</label>
+              <input type="text" id="cfgKeywords" placeholder="steward, assistant" />
+            </div>
+            <div>
+              <label class="kpi-label">Text Model (`TEXT_MODEL`)</label>
+              <input type="text" id="cfgTextModel" />
+            </div>
+            <div>
+              <label class="kpi-label">Vision Model (`VISION_MODEL`)</label>
+              <input type="text" id="cfgVisionModel" />
+            </div>
+            <div>
+              <label class="kpi-label">Image Model (`IMAGE_GEN_MODEL`)</label>
+              <input type="text" id="cfgImageModel" />
+            </div>
+            <div>
+              <label class="kpi-label">Voice Model (`VOICE_MODEL`)</label>
+              <input type="text" id="cfgVoiceModel" />
+            </div>
+            <div>
+              <label class="kpi-label">Temperature</label>
+              <input type="number" id="cfgTemp" step="0.02" />
+            </div>
+            <div>
+              <label class="kpi-label">Top-P</label>
+              <input type="number" id="cfgTopP" step="0.02" />
+            </div>
+            <div>
+              <label class="kpi-label">Respond Chance (0.0-1.0)</label>
+              <input type="number" id="cfgRespChance" step="0.01" />
+            </div>
+            <div>
+              <label class="kpi-label">Emoji Chance (0.0-1.0)</label>
+              <input type="number" id="cfgEmojiChance" step="0.05" />
+            </div>
+            <div>
+              <label class="kpi-label">Random Interval (mins)</label>
+              <input type="number" id="cfgRandInt" step="5" />
+            </div>
+            <div>
+              <label class="kpi-label">Max Output Tokens</label>
+              <input type="number" id="cfgOutLen" step="50" />
+            </div>
+          </div>
+          <div class="btn-row" style="margin-bottom:12px;align-items:center;">
+            <label><input type="checkbox" id="cfgEnVision" /> Enable Vision</label>
+            <label><input type="checkbox" id="cfgEnImage" /> Enable Image/Meme Gen</label>
+            <label><input type="checkbox" id="cfgEnGifs" /> Enable GIFs</label>
+            <label><input type="checkbox" id="cfgEnVoice" /> Enable Voice TTS</label>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="saveVisualBotConfig(true)">⚡ Save Config &amp; Hot-Restart Bot</button>
+            <button class="btn" onclick="saveVisualBotConfig(false)">💾 Save Config Constants Only</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- RAW PYTHON SOURCE EDITOR -->
+      <div class="panel">
+        <div class="panel-title">
+          <span>Python Launcher Script & Persona Prompt Editor (AST-Validated)</span>
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="saveBotStudioScript(true)">💾 Save Full Code &amp; Hot-Restart Bot</button>
+            <button class="btn" onclick="saveBotStudioScript(false)">💾 Save Code Only</button>
+          </div>
+        </div>
+        <textarea id="studioCodeEditor" spellcheck="false" style="width:100%;height:380px;background:#070a10;color:#e5e7eb;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',Consolas,monospace;font-size:12.5px;line-height:1.5;"></textarea>
+      </div>
+    </section>
+
+    <!-- TAB 7: API KEYS ([A]) & GLOBAL HISTORY LENGTH ([H]) IN bot_info/.env -->
+    <section id="tab-env" class="tab-pane">
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title"><span>API Keys & Secrets (bots/bot_info/.env)</span></div>
+          <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">
+            Manage your DeepInfra, Giphy, and Discord Bot API tokens directly in <code>bots/bot_info/.env</code> without opening terminal menus.
+          </p>
+          <div class="form-grid" style="margin-bottom:14px;">
+            <div>
+              <label class="kpi-label">Preset or Custom Key</label>
+              <select id="envKeyPreset" onchange="if(this.value !== '__CUSTOM__') document.getElementById('envKeyName').value = this.value;">
+                <option value="DEEPINFRA_TOKEN">DEEPINFRA_TOKEN (LLM / Vision / FLUX / TTS)</option>
+                <option value="GIPHY_TOKEN">GIPHY_TOKEN (Reaction GIFs)</option>
+                <option value="__CUSTOM__">Custom / Bot Discord Token (*_DISCORD_TOKEN)...</option>
+              </select>
+            </div>
+            <div>
+              <label class="kpi-label">Environment Key Name</label>
+              <input type="text" id="envKeyName" value="DEEPINFRA_TOKEN" placeholder="e.g., GUILDBOT_DISCORD_TOKEN" />
+            </div>
+            <div style="grid-column: span 2;">
+              <label class="kpi-label">Token / Secret Value</label>
+              <input type="text" id="envKeyValue" placeholder="Paste API key or Discord token here..." />
+            </div>
+            <div>
+              <button class="btn btn-primary" style="width:100%;padding:7px;" onclick="saveEnvKey()">💾 Save Key to .env</button>
+            </div>
+          </div>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0;" />
+          <div class="panel-title"><span>Global Max History Length (MAX_HISTORY_LENGTH)</span></div>
+          <div class="form-grid">
+            <div>
+              <label class="kpi-label">Max Messages Stored Per Channel</label>
+              <input type="number" id="envMaxHistory" value="200" min="20" max="2000" step="10" />
+            </div>
+            <div>
+              <button class="btn btn-success" style="width:100%;padding:7px;" onclick="saveGlobalHistoryLength()">⚡ Update MAX_HISTORY_LENGTH</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title"><span>Configured Environment Variables (Masked)</span></div>
+          <table>
+            <thead>
+              <tr><th>Environment Variable</th><th>Masked Value</th><th>Quick Action</th></tr>
+            </thead>
+            <tbody id="envTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let latestState = {
+      bots: [], finops: { models: [] }, social_graph: { nodes: [], edges: [] },
+      room_states: {}, bot_internal_states: {}, subconscious_xray_log: [],
+      episodic_chapters: {}, memory_table: [], channel_configs: {}, recent_logs: []
+    };
+
+    
+    function setAestheticTheme(themeName) {
+      document.documentElement.setAttribute('data-theme', themeName);
+      localStorage.setItem('webui_aesthetic_theme', themeName);
+      const bCyan = document.getElementById('themeBtnCyan');
+      const bAmber = document.getElementById('themeBtnAmber');
+      if (bCyan && bAmber) {
+        bCyan.classList.toggle('active', themeName === 'cyan');
+        bAmber.classList.toggle('active', themeName === 'amber');
+      }
+    }
+    (function initSavedTheme() {
+      const saved = localStorage.getItem('webui_aesthetic_theme') || 'cyan';
+      setAestheticTheme(saved);
+    })();
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 3200);
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      document.getElementById('tab-' + tabId).classList.add('active');
+      if (tabId === 'social') requestAnimationFrame(stepSocialPhysics);
+    }
+
+    // Extract magic-link ?token=... from URL on load and persist in localStorage
+    (function initAdminAuthToken() {
+      const params = new URLSearchParams(window.location.search);
+      const urlTok = params.get('token');
+      if (urlTok) {
+        localStorage.setItem('webui_admin_token', urlTok.trim());
+        params.delete('token');
+        const cleanUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+        window.history.replaceState({}, document.title, cleanUrl);
+      }
+    })();
+
+    function getAdminToken() {
+      return localStorage.getItem('webui_admin_token') || '';
+    }
+
+
+    let currentMagicTunnelUrl = '';
+
+    async function togglePublicTunnel() {
+      const btn = document.getElementById('tunnelBtn');
+      if (btn) btn.textContent = 'STARTING TUNNEL...';
+      showToast('Starting zero-install HTTPS tunnel (via built-in SSH)...');
+      const r = await apiPost('/api/tunnel/toggle', { action: 'toggle' });
+      if (r && r.public_url) {
+        currentMagicTunnelUrl = r.magic_url || r.public_url;
+        showToast('Public Tunnel Online! Click "COPY ADMIN LINK" or type "@Bot admin webui" in Discord.');
+      } else if (r && r.status === 'OFFLINE') {
+        currentMagicTunnelUrl = '';
+        showToast('Public Tunnel stopped.');
+      }
+    }
+
+    function copyPublicMagicLink() {
+      if (!currentMagicTunnelUrl) return;
+      navigator.clipboard.writeText(currentMagicTunnelUrl);
+      showToast('Copied Magic Admin Link to clipboard!');
+    }
+
+    function promptAdminToken(msg) {
+      const entered = prompt(
+        (msg || '🔒 Enter WEBUI_ADMIN_TOKEN (from bots/bot_info/.env or "@Bot admin webui" in Discord):'),
+        getAdminToken()
+      );
+      if (entered !== null) {
+        localStorage.setItem('webui_admin_token', entered.trim());
+        fetchState();
+        connectSSE();
+      }
+    }
+
+    async function apiPost(endpoint, payload) {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Token': getAdminToken()
+        },
+        body: JSON.stringify(payload)
+      });
+      if (res.status === 401) {
+        promptAdminToken('🔒 Remote Admin Authentication Required — Enter WEBUI_ADMIN_TOKEN:');
+        return null;
+      }
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        showToast('⚠️ ' + (data.error || 'Operation failed'));
+        return null;
+      }
+      await fetchState();
+      return data;
+    }
+
+    async function botAction(botName, action) {
+      const r = await apiPost('/api/bot/action', { bot: botName, action });
+      if (r) showToast(`✅ Sent '${action}' to ${botName}`);
+    }
+
+    async function submitNewMemory() {
+      const store = document.getElementById('memStoreSelect').value;
+      const owner = document.getElementById('memOwnerInput').value.trim() || 'Server';
+      const category = document.getElementById('memCatSelect').value;
+      const salience = parseInt(document.getElementById('memSalInput').value || '80', 10);
+      const text = document.getElementById('memTextInput').value.trim();
+      if (!text) return showToast('⚠️ Enter fact text first');
+      const r = await apiPost('/api/memory/mutate', { store, owner, op: 'add', text, salience, category });
+      if (r) {
+        document.getElementById('memTextInput').value = '';
+        showToast('✅ Memory saved (passed Zero-PII Firewall)');
+      }
+    }
+
+    async function mutateMemoryRow(store, owner, index, op, currentText, sal, cat) {
+      let text = currentText;
+      if (op === 'edit') {
+        const edited = prompt('Edit memory fact (Zero-PII Firewall active):', currentText);
+        if (!edited || edited.trim() === currentText) return;
+        text = edited.trim();
+      }
+      const r = await apiPost('/api/memory/mutate', { store, owner, index, op, text, salience: sal, category: cat });
+      if (r) showToast(`✅ Memory ${op} complete`);
+    }
+
+    async function saveChannelTuning() {
+      const chId = document.getElementById('tuneChannelId').value.trim();
+      if (!chId) return showToast('⚠️ Enter a Discord Channel ID first');
+      const updates = {
+        temperature: parseFloat(document.getElementById('tuneTemp').value || '0.78'),
+        resp_chance: parseFloat(document.getElementById('tuneResp').value || '0.05'),
+        emoji_chance: parseFloat(document.getElementById('tuneEmoji').value || '0.45'),
+        random_interval: parseFloat(document.getElementById('tuneRandom').value || '0')
+      };
+      const r = await apiPost('/api/channel/config', { channel_id: chId, updates });
+      if (r) showToast(`✅ Updated channel ${chId} parameters`);
+    }
+
+    async function toggleChannelFlag(chId, flagKey, curVal) {
+      const r = await apiPost('/api/channel/config', {
+        channel_id: String(chId),
+        updates: { [flagKey]: !curVal }
+      });
+      if (r) showToast(`⚙️ Channel ${chId}: ${flagKey} = ${!curVal}`);
+    }
+
+    async function injectDirectorStage() {
+      const payload = {
+        channel_id: document.getElementById('dirChannelId').value.trim() || '0',
+        active_topic: document.getElementById('dirTopic').value.trim(),
+        room_vibe: document.getElementById('dirVibe').value.trim(),
+        prop: document.getElementById('dirProp').value.trim(),
+        open_hook: document.getElementById('dirHook').value.trim()
+      };
+      const r = await apiPost('/api/director/inject', payload);
+      if (r) {
+        showToast('🎬 Stage direction injected into Room Blackboard!');
+        document.getElementById('dirProp').value = '';
+        document.getElementById('dirHook').value = '';
+      }
+    }
+
+    function renderAll(state) {
+      latestState = state || latestState;
+      const bots = latestState.bots || [];
+      const runningCnt = bots.filter(b => b.status === 'RUNNING').length;
+      document.getElementById('kpiBots').textContent = `${runningCnt} / ${bots.length}`;
+      const tInfo = latestState.tunnel_info || {};
+      const tBtn = document.getElementById('tunnelBtn');
+      const cBtn = document.getElementById('copyMagicBtn');
+      if (tBtn) {
+        if (tInfo.status === 'ONLINE' && tInfo.public_url) {
+          currentMagicTunnelUrl = tInfo.magic_url || tInfo.public_url;
+          tBtn.textContent = 'TUNNEL: ONLINE (STOP)';
+          tBtn.className = 'btn btn-success';
+          tBtn.style.padding = '5px 11px';
+          tBtn.style.fontSize = '12px';
+          if (cBtn) cBtn.style.display = 'inline-block';
+        } else {
+          tBtn.textContent = 'START PUBLIC TUNNEL';
+          tBtn.className = 'btn btn-ghost';
+          if (cBtn) cBtn.style.display = 'none';
+        }
+      }
+      const fin = latestState.finops || {};
+      document.getElementById('kpiTokens').textContent = (fin.total_tokens || 0).toLocaleString();
+      document.getElementById('kpiCost').textContent = `$${(fin.total_estimated_cost_usd || 0).toFixed(4)}`;
+      document.getElementById('kpiDhash').textContent = `${fin.vision_dhash_cached_items || 0} cached`;
+
+      // 1. Bot Cards
+      const grid = document.getElementById('botCardsGrid');
+      if (bots.length === 0) {
+        grid.innerHTML = `<div class="bot-card" style="color:var(--text-muted);">No launcher scripts discovered yet. Run <code>python orchestrator.py --bots guild_assistant.py cat_bot.py</code> or place launcher scripts in the root directory.</div>`;
+      } else {
+        grid.innerHTML = bots.map(b => `
+          <div class="bot-card">
+            <div class="bot-header">
+              <strong>${b.name} <span style="color:var(--text-muted);font-weight:400;font-size:11.5px;">(${b.script})</span></strong>
+              <span class="badge ${b.status}">${b.status}</span>
+            </div>
+            <div class="metrics-row">
+              <div><div class="kpi-label">PID</div><strong>${b.pid || '—'}</strong></div>
+              <div><div class="kpi-label">RAM</div><strong>${b.ram_mb || 0} MB</strong></div>
+              <div><div class="kpi-label">CPU</div><strong>${b.cpu_percent || 0}%</strong></div>
+              <div><div class="kpi-label">WS Ping</div><strong>${b.ws_latency_ms || 0} ms</strong></div>
+            </div>
+            <div style="font-size:11.5px;color:var(--text-muted);display:flex;justify-content:space-between;">
+              <span>Uptime: ${Math.floor((b.uptime_sec || 0) / 60)}m ${(b.uptime_sec || 0) % 60}s</span>
+              <span>Restarts: ${b.restarts || 0} • Bucket: ${b.tokens_remaining ?? 4.0}/4.0</span>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-success" onclick="botAction('${b.name}', 'start')">▶ Start</button>
+              <button class="btn" onclick="botAction('${b.name}', 'restart')">🔄 Restart</button>
+              <button class="btn btn-danger" onclick="botAction('${b.name}', 'stop')">⏹ Stop</button>
+              ${b.quarantined ? `<button class="btn btn-primary" onclick="botAction('${b.name}', 'unquarantine')">🔓 Unquarantine</button>` : ''}
+            </div>
+          </div>
+        `).join('');
+      }
+
+      // 2. Model Matrix
+      const mBody = document.getElementById('modelMatrixBody');
+      const models = fin.models || [];
+      mBody.innerHTML = models.length ? models.map(m => `
+        <tr>
+          <td><code>${m.model_key}</code></td>
+          <td><span class="badge ${m.circuit_status}">${m.circuit_status}</span></td>
+          <td>${(m.ewma_latency_sec || 0).toFixed(2)}s</td>
+          <td>${((m.ewma_error_rate || 0) * 100).toFixed(1)}%</td>
+          <td>${m.calls || 0} <span style="color:var(--text-muted);">(${m.failures || 0} err)</span></td>
+          <td>${((m.prompt_tokens || 0) + (m.completion_tokens || 0)).toLocaleString()}</td>
+          <td>$${(m.estimated_cost_usd || 0).toFixed(4)}</td>
+        </tr>
+      `).join('') : `<tr><td colspan="7" style="color:var(--text-muted);">Waiting for first model call telemetry...</td></tr>`;
+
+      // 3. Subconscious X-Ray & Room Blackboard
+      const xrayBox = document.getElementById('xrayStreamBox');
+      const xlogs = (latestState.subconscious_xray_log || []).slice().reverse();
+      xrayBox.innerHTML = xlogs.length ? xlogs.map(x => `
+        <div class="xray-card">
+          <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-muted);">
+            <span><strong>${x.bot || 'Bot'}</strong> replying to <strong>${x.speaker || 'User'}</strong> (Ch: ${x.channel_id || 0})</span>
+            <span>Mood: <strong style="color:var(--emerald);">${x.mood || 'Steady'}</strong> • +${x.facts_learned || 0} facts</span>
+          </div>
+          ${x.thought ? `<div class="thought-bubble">💭 [THOUGHT]: "${x.thought}"</div>` : ''}
+          <div style="margin-top:5px;font-size:12px;">
+            <strong>Topic:</strong> ${x.active_topic || 'General chat'} &nbsp;|&nbsp; <strong>Vibe:</strong> ${x.room_vibe || 'Normal'}
+          </div>
+        </div>
+      `).join('') : `<div style="color:var(--text-muted);">No subconscious turns logged yet. Chat with a bot in Discord to stream live [THOUGHT:] subtext!</div>`;
+
+      const rbBox = document.getElementById('roomBlackboardBox');
+      const rStates = latestState.room_states || {};
+      const rKeys = Object.keys(rStates);
+      rbBox.innerHTML = rKeys.length ? rKeys.map(ck => {
+        const rs = rStates[ck] || {};
+        const props = (rs.active_props || []).map(p => `${p.item} (TTL:${p.ttl})`).join(', ') || 'None';
+        const hook = rs.open_hook ? `${rs.open_hook.speaker}: "${rs.open_hook.hook}"` : 'None';
+        return `
+          <div style="background:#161f30;padding:10px;border-radius:6px;margin-bottom:8px;border:1px solid var(--border);">
+            <div><strong>Channel #${ck}</strong> — Pace: <code>${rs.conversational_pace || 'normal'}</code></div>
+            <div>• <strong>Active Topic:</strong> ${rs.active_topic || '—'} | <strong>Vibe:</strong> ${rs.room_vibe || '—'}</div>
+            <div>• <strong>Room Props (5-Turn TTL):</strong> ${props}</div>
+            <div>• <strong>Unfinished Hook:</strong> ${hook}</div>
+            <div>• <strong>RAG Semantic Tags:</strong> ${(rs.semantic_tags || []).join(', ') || '—'}</div>
+          </div>
+        `;
+      }).join('') : `<div style="color:var(--text-muted);">No active room blackboards yet.</div>`;
+
+      const epBox = document.getElementById('episodicChaptersBox');
+      const epMap = latestState.episodic_chapters || {};
+      const epEntries = [];
+      Object.keys(epMap).forEach(ck => {
+        (epMap[ck] || []).forEach(ch => epEntries.push({ ck, ...ch }));
+      });
+      epBox.innerHTML = epEntries.length ? epEntries.slice(-8).reverse().map(e => `
+        <div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06);">
+          <strong>🔖 ${e.title || 'Session'}</strong> <span style="color:var(--text-muted);font-size:11px;">(${e.date || ''} • Ch ${e.ck})</span>
+          <div style="color:#d1d5db;font-size:12px;">${e.summary || ''}</div>
+        </div>
+      `).join('') : `<div style="color:var(--text-muted);">No episodic chapters archived yet.</div>`;
+
+      // 4. Memory CRUD Table
+      renderMemoryTable();
+
+      // 5. Channel Configs
+      const chBox = document.getElementById('existingChannelsBox');
+      const chMap = latestState.channel_configs || {};
+      const chKeys = Object.keys(chMap).filter(k => !k.startsWith('guild_welcome_'));
+      chBox.innerHTML = chKeys.length ? chKeys.map(cid => {
+        const c = chMap[cid] || {};
+        return `
+          <div style="background:#161f30;padding:10px;border-radius:6px;margin-bottom:8px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <div>
+              <strong>Channel <code>${cid}</code></strong>
+              <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">
+                Temp=${c.temperature ?? 0.78} | Resp=${c.resp_chance ?? 0.05} | Emoji=${c.emoji_chance ?? 0.45} | Idle=${c.random_interval ?? 0}m
+              </span>
+            </div>
+            <div class="btn-row">
+              <button class="btn ${c.enabled !== false ? 'btn-success' : 'btn-danger'}" onclick="toggleChannelFlag('${cid}', 'enabled', ${c.enabled !== false})">Enabled: ${c.enabled !== false}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'react_only', ${!!c.react_only})">ReactOnly: ${!!c.react_only}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_image', ${c.enable_image !== false})">Image/Meme: ${c.enable_image !== false}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_voice', ${c.enable_voice !== false})">Voice: ${c.enable_voice !== false}</button>
+            </div>
+          </div>
+        `;
+      }).join('') : `<div style="color:var(--text-muted);">No per-channel overrides saved yet.</div>`;
+
+      // 6. Render .env Keys & Global MAX_HISTORY_LENGTH
+      const envSum = latestState.env_summary || {};
+      const histInput = document.getElementById('envMaxHistory');
+      if (histInput && document.activeElement !== histInput && envSum.max_history_length) {
+        histInput.value = envSum.max_history_length;
+      }
+      const envTbody = document.getElementById('envTableBody');
+      if (envTbody) {
+        const eKeys = envSum.keys || [];
+        envTbody.innerHTML = eKeys.length ? eKeys.map(item => `
+          <tr>
+            <td><code>${item.key}</code></td>
+            <td style="font-family:monospace;color:var(--emerald);">${item.masked}</td>
+            <td>
+              <button class="btn" onclick="document.getElementById('envKeyPreset').value='__CUSTOM__';document.getElementById('envKeyName').value='${item.key}';document.getElementById('envKeyValue').focus();">✏️ Update</button>
+            </td>
+          </tr>
+        `).join('') : `<tr><td colspan="3" style="color:var(--text-muted);">No keys in bot_info/.env yet.</td></tr>`;
+      }
+
+      // 7. Sync Social Graph Nodes & Edges
+      syncSocialGraphData(latestState.social_graph || { nodes: [], edges: [] });
+    }
+
+    function renderMemoryTable() {
+      const q = (document.getElementById('memSearchInput')?.value || '').toLowerCase().trim();
+      const rows = (latestState.memory_table || []).filter(r => {
+        if (!q) return true;
+        return (r.owner || '').toLowerCase().includes(q) ||
+               (r.category || '').toLowerCase().includes(q) ||
+               (r.text || '').toLowerCase().includes(q);
+      });
+      const tbody = document.getElementById('memoryTableBody');
+      tbody.innerHTML = rows.length ? rows.map(r => {
+        const safeTxt = (r.text || '').replace(/'/g, "\\'");
+        return `
+          <tr>
+            <td><strong>${r.owner}</strong><br/><span style="font-size:10.5px;color:var(--text-muted);">${r.store}</span></td>
+            <td><span class="badge ${r.salience >= 90 ? 'RUNNING' : 'BACKOFF'}">S:${r.salience} • ${r.category}</span></td>
+            <td>
+              <div class="ret-bar"><div class="ret-fill" style="width:${Math.min(100, r.retention_pct)}%"></div></div>
+              <span>${r.retention_pct}%</span>
+            </td>
+            <td>${r.text}</td>
+            <td style="font-size:11px;color:var(--text-muted);">${r.date}<br/>Recalls: ${r.recalls}</td>
+            <td>
+              <div class="btn-row">
+                <button class="btn" title="Pin as Core Identity (S:98)" onclick="mutateMemoryRow('${r.store}', '${r.owner}', ${r.index}, 'pin', '${safeTxt}', 98, 'CORE')">📌 Pin</button>
+                <button class="btn" onclick="mutateMemoryRow('${r.store}', '${r.owner}', ${r.index}, 'edit', '${safeTxt}', ${r.salience}, '${r.category}')">✏️</button>
+                <button class="btn btn-danger" onclick="mutateMemoryRow('${r.store}', '${r.owner}', ${r.index}, 'delete', '', 0, '')">🗑️</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="6" style="color:var(--text-muted);">No matching memories found.</td></tr>`;
+    }
+
+    function appendConsoleLog(entry) {
+      const box = document.getElementById('logConsole');
+      const div = document.createElement('div');
+      div.className = 'log-line ' + (entry.level || 'INFO');
+      div.textContent = `[${entry.time_str || ''}] [${entry.bot || 'Sys'}] ${entry.msg || ''}`;
+      box.appendChild(div);
+      while (box.children.length > 120) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    // =========================================================================
+    // UPGRADE #9: FRUCHTERMAN-REINGOLD FORCE-DIRECTED SOCIAL GRAPH ENGINE
+    // =========================================================================
+    const graphNodes = new Map();
+    let graphEdges = [];
+    let draggedNode = null;
+
+    function syncSocialGraphData(sg) {
+      const incomingNodes = sg.nodes || [];
+      graphEdges = sg.edges || [];
+      const canvas = document.getElementById('socialCanvas');
+      const cx = canvas.width / 2, cy = canvas.height / 2;
+
+      incomingNodes.forEach((n, idx) => {
+        const existing = graphNodes.get(n.id);
+        if (existing) {
+          Object.assign(existing, n);
+        } else {
+          const angle = (2 * Math.PI * idx) / Math.max(1, incomingNodes.length);
+          graphNodes.set(n.id, {
+            ...n,
+            x: cx + Math.cos(angle) * 140 + (Math.random() - 0.5) * 20,
+            y: cy + Math.sin(angle) * 140 + (Math.random() - 0.5) * 20,
+            vx: 0, vy: 0
+          });
+        }
+      });
+
+      const eBody = document.getElementById('edgesTableBody');
+      eBody.innerHTML = graphEdges.length ? graphEdges.map(e => {
+        const sign = e.weight > 0 ? `+${e.weight}` : e.weight;
+        const col = e.weight >= 45 ? 'var(--emerald)' : (e.weight >= 15 ? 'var(--sky)' : (e.weight <= -10 ? 'var(--crimson)' : 'var(--text-muted)'));
+        return `
+          <tr>
+            <td><strong>${e.source}</strong> ➔ <strong>${e.target}</strong></td>
+            <td style="color:${col};font-weight:700;">${sign}/100</td>
+            <td>${e.tier || ''}<br/><span style="font-size:11px;color:var(--text-muted);">${e.archetype || ''}</span></td>
+            <td style="font-size:11.5px;color:var(--text-muted);">${e.catalyst || '—'}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="4" style="color:var(--text-muted);">No relationship edges logged yet.</td></tr>`;
+    }
+
+    function stepSocialPhysics() {
+      const canvas = document.getElementById('socialCanvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const nodes = Array.from(graphNodes.values());
+
+      // Fruchterman-Reingold repulsive + spring attractive forces
+      const kRepel = 4800;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          let dx = a.x - b.x, dy = a.y - b.y;
+          let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          let force = kRepel / (dist * dist);
+          let fx = (dx / dist) * force, fy = (dy / dist) * force;
+          a.vx += fx; a.vy += fy;
+          b.vx -= fx; b.vy -= fy;
+        }
+      }
+
+      graphEdges.forEach(e => {
+        const s = graphNodes.get(e.source), t = graphNodes.get(e.target);
+        if (!s || !t) return;
+        let dx = t.x - s.x, dy = t.y - s.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        // Allies pull closer (ideal 120px), rivals push further apart (ideal 210px)
+        let idealDist = e.weight >= 20 ? 125 : (e.weight <= -10 ? 210 : 165);
+        let force = (dist - idealDist) * 0.035;
+        let fx = (dx / dist) * force, fy = (dy / dist) * force;
+        s.vx += fx; s.vy += fy;
+        t.vx -= fx; t.vy -= fy;
+      });
+
+      nodes.forEach(n => {
+        if (n === draggedNode) return;
+        // Gentle center gravity
+        n.vx += (W / 2 - n.x) * 0.004;
+        n.vy += (H / 2 - n.y) * 0.004;
+        n.vx *= 0.78; n.vy *= 0.78;
+        n.x = Math.max(36, Math.min(W - 36, n.x + n.vx));
+        n.y = Math.max(36, Math.min(H - 36, n.y + n.vy));
+      });
+
+      // Render Canvas
+      ctx.clearRect(0, 0, W, H);
+      graphEdges.forEach(e => {
+        const s = graphNodes.get(e.source), t = graphNodes.get(e.target);
+        if (!s || !t) return;
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(t.x, t.y);
+        if (e.weight >= 45) {
+          ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2.8; ctx.setLineDash([]);
+        } else if (e.weight >= 15) {
+          ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2.0; ctx.setLineDash([]);
+        } else if (e.weight <= -10) {
+          ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2.0; ctx.setLineDash([6, 4]);
+        } else {
+          ctx.strokeStyle = '#64748b'; ctx.lineWidth = 1.4; ctx.setLineDash([3, 3]);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      });
+
+      nodes.forEach(n => {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.type === 'bot' ? 19 : 15, 0, Math.PI * 2);
+        ctx.fillStyle = n.type === 'bot' ? '#6366f1' : '#10b981';
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#0f172a';
+        ctx.stroke();
+
+        ctx.fillStyle = '#f9fafb';
+        ctx.font = '600 12px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(n.label || n.id, n.x, n.y + 31);
+      });
+
+      if (document.getElementById('tab-social').classList.contains('active')) {
+        requestAnimationFrame(stepSocialPhysics);
+      }
+    }
+
+    (function initCanvasInteraction() {
+      const canvas = document.getElementById('socialCanvas');
+      canvas.addEventListener('mousedown', e => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+        for (const n of graphNodes.values()) {
+          if (Math.hypot(n.x - mx, n.y - my) <= 22) {
+            draggedNode = n;
+            document.getElementById('nodeInspectorBox').innerHTML = `
+              <div style="background:#161f30;padding:10px;border-radius:6px;border:1px solid var(--border);">
+                <div style="font-size:15px;font-weight:700;">${n.type === 'bot' ? '🤖' : '👤'} ${n.label}</div>
+                <div><strong>Disposition Tier:</strong> ${n.tier || 'Neutral'} (${n.affinity !== undefined ? (n.affinity > 0 ? '+' + n.affinity : n.affinity) + '/100' : 'Bot Node'})</div>
+                <div><strong>Archetype:</strong> ${n.archetype || 'Channel Co-Star'}</div>
+                <div><strong>Trend:</strong> ${n.trend || 'Steady'}</div>
+                <div><strong>Recent Catalyst:</strong> ${n.catalyst || 'None logged'}</div>
+              </div>
+            `;
+            break;
+          }
+        }
+      });
+      window.addEventListener('mousemove', e => {
+        if (!draggedNode) return;
+        const rect = canvas.getBoundingClientRect();
+        draggedNode.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        draggedNode.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      });
+      window.addEventListener('mouseup', () => { draggedNode = null; });
+    })();
+
+    let activeEventSource = null;
+
+    async function fetchState() {
+      try {
+        const res = await fetch('/api/state', {
+          headers: { 'X-Admin-Token': getAdminToken() }
+        });
+        if (res.status === 401) {
+          promptAdminToken('🔒 Remote Admin Authentication Required — Enter WEBUI_ADMIN_TOKEN:');
+          return;
+        }
+        if (res.ok) {
+          const data = await res.json();
+          renderAll(data);
+        }
+      } catch (e) {}
+    }
+
+    function connectSSE() {
+      if (activeEventSource) {
+        try { activeEventSource.close(); } catch (e) {}
+      }
+      const pill = document.getElementById('sseStatus');
+      const tokParam = getAdminToken() ? `?token=${encodeURIComponent(getAdminToken())}` : '';
+      const es = new EventSource('/api/stream' + tokParam);
+      activeEventSource = es;
+      es.onopen = () => {
+        pill.textContent = 'LIVE TELEMETRY';
+        pill.classList.remove('disconnected');
+      };
+      es.addEventListener('state', ev => {
+        try { renderAll(JSON.parse(ev.data)); } catch (e) {}
+      });
+      es.addEventListener('log', ev => {
+        try { appendConsoleLog(JSON.parse(ev.data)); } catch (e) {}
+      });
+      es.onerror = () => {
+        pill.textContent = '○ Reconnecting SSE...';
+        pill.classList.add('disconnected');
+      };
+    }
+
+    fetchState().then(() => {
+      (latestState.recent_logs || []).forEach(appendConsoleLog);
+      connectSSE();
+    });
+  </script>
+</body>
+</html>

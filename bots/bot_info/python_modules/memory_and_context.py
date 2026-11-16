@@ -19,6 +19,28 @@ from config import (
 )
 from core_system import post_with_backoff, update_json_file
 from text_and_parsers import extract_used_emotes, parse_meme_gen_tag
+from subconscious_engine import (
+    sanitize_or_reject_sensitive_pii,
+    pack_salience_fact,
+    unpack_salience_fact,
+    format_fact_for_display,
+    compute_ebbinghaus_retention,
+    evict_lowest_retention_facts,
+    select_relevant_memories_bm25,
+    compute_heider_triadic_balance_delta,
+    apply_session_diminishing_returns,
+    get_disposition_tier_with_hysteresis,
+    compute_zlib_ncd,
+    detect_ncd_structural_loop,
+    enforce_dynamic_token_budget,
+    format_message_reactions_footer,
+    update_message_reaction_ledger,
+    record_and_check_user_reunion,
+    get_and_tick_bot_internal_state,
+    save_bot_thought_subtext,
+    build_subconscious_context_injection,
+    run_subconscious_cognitive_turn,
+)
 
 # ==============================================================================
 # PRE-COMPILED REGEXES & CONSTANTS FOR HIGH-THROUGHPUT MEMORY PROCESSING
@@ -120,7 +142,7 @@ def _extract_base_username(uname: str) -> str:
     """
     Extracts the clean base handle from a display name that may contain
     parenthetical pronouns or version suffixes (e.g., 'Sam (Tam/Tamself)' -> 'sam',
-    'uwu Bot 3.1' -> 'uwu bot', while keeping 'UwU Bot\'s Cat' -> 'uwu bot\'s cat').
+    'Guild Bot 3.1' -> 'guild bot', while keeping 'Guild\'s Cat' -> 'guild\'s cat').
     """
     if not uname:
         return ""
@@ -248,7 +270,7 @@ def normalize_tokens(text: str) -> set[str]:
 
 
 def is_duplicate_fact(new_fact: str, existing_facts: list[str], threshold: float = 0.60) -> bool:
-    new_clean = new_fact.strip().lower()
+    new_clean = unpack_salience_fact(new_fact)["text"].strip().lower()
     if not new_clean or len(new_clean) < 4:
         return True
     new_tokens = normalize_tokens(new_clean)
@@ -256,7 +278,7 @@ def is_duplicate_fact(new_fact: str, existing_facts: list[str], threshold: float
         return True
 
     for existing in existing_facts:
-        ex_clean = existing.strip().lower()
+        ex_clean = unpack_salience_fact(str(existing))["text"].strip().lower()
         if new_clean == ex_clean or new_clean in ex_clean or ex_clean in new_clean:
             return True
         ex_tokens = normalize_tokens(ex_clean)
@@ -481,17 +503,9 @@ def infer_persona_affinity_seed(persona_prompt: str, target_name: str) -> tuple[
     return 8, f"Known from persona bio: {summary_snippet}"
 
 
-def _get_disposition_tier_label(score: int) -> str:
-    """Maps a numeric Affinity score (-100 to +100) to a descriptive Disposition Tier."""
-    if score <= -35:
-        return "Cold & Cutting"
-    if score <= -10:
-        return "Prickly & Skeptical"
-    if score < 15:
-        return "Aloof & Guarded"
-    if score < 50:
-        return "Thawing & Reluctantly Amused"
-    return "Trusted Inner Circle"
+def _get_disposition_tier_label(score: int, previous_tier: str = "") -> str:
+    """Maps a numeric Affinity score (-100 to +100) to a Disposition Tier with +-3 pt Schmitt-Trigger Hysteresis."""
+    return get_disposition_tier_with_hysteresis(score, previous_tier=previous_tier)
 
 
 def _derive_relationship_archetype(
@@ -876,12 +890,15 @@ def _evaluate_triadic_rapport_shift(
         target_aff, _, _, _ = _extract_saved_rapport_state_full(
             facts_list, persona_prompt=persona_prompt, target_name=str(prof_user)
         )
-        if is_hostile_msg and target_aff >= 20:
-            return -10, "Cooling — Rude to a Friend", f"Was hostile/rude toward friend {prof_user}"
-        if is_supportive_msg and target_aff >= 20:
-            return 7, "Warming — Kind to a Friend", f"Was kind/supportive toward {prof_user}"
-        if is_banter_msg and target_aff <= -10 and not is_hostile_msg:
-            return 4, "Amused — Teased a Rival", f"Playfully roasted/teased foil {prof_user}"
+        if is_hostile_msg and target_aff >= 15:
+            h_delta = min(-6, compute_heider_triadic_balance_delta(target_aff, -1.25))
+            return h_delta, "Cooling — Rude to a Friend", f"Was hostile/rude toward friend {prof_user}"
+        if is_supportive_msg and target_aff >= 15:
+            h_delta = max(4, compute_heider_triadic_balance_delta(target_aff, 1.0))
+            return h_delta, "Warming — Kind to a Friend", f"Was kind/supportive toward {prof_user}"
+        if (is_banter_msg or is_hostile_msg) and target_aff <= -10:
+            h_delta = max(3, compute_heider_triadic_balance_delta(target_aff, -0.75))
+            return h_delta, "Amused — Teased a Rival", f"Playfully roasted/teased foil {prof_user}"
 
     return 0, "", ""
 
@@ -973,10 +990,19 @@ def extract_implicit_user_facts_from_message(
             trend = tri_trend
             cat_note = tri_cat
 
-    if delta != 0:
-        extracted.append((speaker_name, f"__RAPPORT_SHIFT__:{delta}|{trend}|{cat_note}"))
+    # Sanitize all extracted self-facts through the 0ms Zero-PII Firewall (e.g. 'Real name is First Last' -> 'First name is First')
+    sanitized_extracted: list[tuple[str, str]] = []
+    for u_name, raw_f in extracted:
+        safe_f = sanitize_or_reject_sensitive_pii(raw_f)
+        if safe_f:
+            sanitized_extracted.append((u_name, safe_f))
 
-    return extracted
+    if delta != 0:
+        if delta > 0:
+            delta = apply_session_diminishing_returns(0, speaker_name, delta)
+        sanitized_extracted.append((speaker_name, f"__RAPPORT_SHIFT__:{delta}|{trend}|{cat_note}"))
+
+    return sanitized_extracted
 
 
 def _extract_outer_json_object(raw_text: str) -> str | None:
@@ -1108,10 +1134,25 @@ def consolidate_and_append_fact(
         _upsert_rapport_line_in_list(existing_facts, new_score, new_trend, catalyst=note_body)
         return False
 
-    if len(clean_new) < 4 or is_ephemeral_or_banter_fact(clean_new):
+    # Mandatory 0ms Zero-PII & Sensitive Data Firewall before saving any fact
+    safe_candidate = sanitize_or_reject_sensitive_pii(clean_new)
+    if not safe_candidate:
         return False
 
-    new_low = clean_new.lower()
+    unpacked_new = unpack_salience_fact(safe_candidate)
+    plain_new = unpacked_new["text"].strip().rstrip(".")
+    if len(plain_new) < 4 or is_ephemeral_or_banter_fact(plain_new):
+        return False
+
+    packed_new = pack_salience_fact(
+        plain_new,
+        salience=unpacked_new["salience"],
+        category=unpacked_new["category"],
+        date_str=unpacked_new["date"],
+        recalls=unpacked_new["recalls"],
+    )
+
+    new_low = plain_new.lower()
     new_tokens = normalize_tokens(new_low)
     if not new_tokens:
         return False
@@ -1120,9 +1161,11 @@ def consolidate_and_append_fact(
     fact_added_or_updated = False
 
     for idx, existing in enumerate(existing_facts):
-        ex_clean = str(existing).strip().rstrip(".")
-        if RAPPORT_ENTRY_REGEX.match(ex_clean):
+        ex_raw = str(existing).strip().rstrip(".")
+        if RAPPORT_ENTRY_REGEX.match(ex_raw):
             continue
+        ex_unpacked = unpack_salience_fact(ex_raw)
+        ex_clean = ex_unpacked["text"].strip().rstrip(".")
         ex_low = ex_clean.lower()
         if new_low == ex_low or new_low in ex_low:
             return False
@@ -1131,22 +1174,22 @@ def consolidate_and_append_fact(
         if new_gender:
             ex_gender = _classify_gender_polarity(ex_low)
             if ex_gender:
-                if ex_gender != new_gender or len(clean_new) > len(ex_clean):
-                    existing_facts[idx] = clean_new
+                if ex_gender != new_gender or len(plain_new) > len(ex_clean):
+                    existing_facts[idx] = packed_new
                     fact_added_or_updated = True
                     break
                 return False
 
-        if ex_low in new_low and len(clean_new) > len(ex_clean):
-            existing_facts[idx] = clean_new
+        if ex_low in new_low and len(plain_new) > len(ex_clean):
+            existing_facts[idx] = packed_new
             fact_added_or_updated = True
             break
         ex_tokens = normalize_tokens(ex_low)
         if ex_tokens:
             overlap = len(new_tokens & ex_tokens) / float(min(len(new_tokens), len(ex_tokens)))
             if overlap >= overlap_threshold:
-                if len(clean_new) > len(ex_clean) + 6:
-                    existing_facts[idx] = clean_new
+                if len(plain_new) > len(ex_clean) + 6:
+                    existing_facts[idx] = packed_new
                     fact_added_or_updated = True
                     break
                 return False
@@ -1154,35 +1197,31 @@ def consolidate_and_append_fact(
     old_score, old_trend, prev_cat, r_idx = _extract_saved_rapport_state_full(existing_facts)
     if not fact_added_or_updated:
         if r_idx != -1:
-            existing_facts.insert(r_idx, clean_new)
+            existing_facts.insert(r_idx, packed_new)
         else:
-            existing_facts.append(clean_new)
+            existing_facts.append(packed_new)
         fact_added_or_updated = True
 
     if fact_added_or_updated:
-        f_val = score_learned_fact_valence(clean_new)
+        f_val = score_learned_fact_valence(plain_new)
         if f_val != 0:
             f_trend = "Warming Up — Shared Lore" if f_val > 0 else "Cooling Down — Negative Fact"
             base_before_new = 0 if r_idx == -1 else old_score
             if r_idx == -1 and len(existing_facts) > 1:
                 base_before_new = sum(
-                    score_learned_fact_valence(str(x))
+                    score_learned_fact_valence(unpack_salience_fact(str(x))["text"])
                     for x in existing_facts[:-1]
                     if not RAPPORT_ENTRY_REGEX.match(str(x).strip())
                 )
                 base_before_new = max(-40, min(35, base_before_new))
             new_sc, new_tr = _apply_affinity_shift(base_before_new, f_val, f_trend)
-            cat_to_use = clean_new if abs(f_val) >= 7 else prev_cat
+            cat_to_use = plain_new if abs(f_val) >= 7 else prev_cat
             _upsert_rapport_line_in_list(existing_facts, new_sc, new_tr, catalyst=cat_to_use)
 
     if len(existing_facts) > max_items:
-        _, _, _, r_idx = _extract_saved_rapport_state_full(existing_facts)
-        rapport_line = existing_facts[r_idx] if r_idx != -1 else None
-        non_rapport = [f for f in existing_facts if not RAPPORT_ENTRY_REGEX.match(str(f).strip())]
-        if rapport_line:
-            existing_facts[:] = non_rapport[-(max_items - 1):] + [rapport_line]
-        else:
-            existing_facts[:] = non_rapport[-max_items:]
+        existing_facts[:] = evict_lowest_retention_facts(
+            existing_facts, max_items=max_items, rapport_regex=RAPPORT_ENTRY_REGEX
+        )
 
     return fact_added_or_updated
 
@@ -1321,33 +1360,49 @@ def select_relevant_memories(
     facts_list: list[str],
     active_context_text: str,
     max_items: int = 5,
-    min_specificity_score: float = 2.0
+    min_specificity_score: float = 2.0,
+    semantic_tags: list[str] | None = None,
 ) -> list[str]:
     """
-    IDF-Weighted Memory Gate:
-    Filters `long_term_memory` or `general_memory` so ONLY facts that achieve an
-    IDF specificity score >= `min_specificity_score` (at least one specific domain/proper
-    noun match, never just a generic word like 'game' or 'work') are injected into the prompt.
+    Upgrade #4 — Hybrid Okapi BM25 + Ebbinghaus Retention + IDF Specificity Memory Gate:
+    Combines `select_relevant_memories_bm25` (corpus IDF + length normalization + Ebbinghaus
+    retention R(t) + semantic_tags) with stem-specificity verification, returning clean
+    unprefixed fact strings so metadata tags never leak into chat.
     """
     if not facts_list or not isinstance(facts_list, list):
         return []
 
-    clean_pool = [str(f).strip() for f in facts_list if f and not is_ephemeral_or_banter_fact(str(f))]
+    clean_pool = [
+        str(f).strip()
+        for f in facts_list
+        if f and not is_ephemeral_or_banter_fact(unpack_salience_fact(str(f))["text"])
+    ]
     if not clean_pool:
         return []
 
-    if MEMORY_RECALL_QUERY_REGEX.search(active_context_text or ""):
-        return clean_pool[-max_items:]
+    is_recall = bool(MEMORY_RECALL_QUERY_REGEX.search(active_context_text or ""))
+    bm25_hits = select_relevant_memories_bm25(
+        clean_pool,
+        active_context_text=active_context_text,
+        semantic_tags=semantic_tags,
+        max_items=max_items,
+        min_score=1.65,
+        is_recall_query=is_recall,
+    )
+    if bm25_hits or is_recall:
+        return bm25_hits
 
     query_weights = _extract_weighted_stems(active_context_text)
     if not query_weights:
         return []
 
     scored = []
-    for idx, fact in enumerate(clean_pool):
-        score = _compute_stem_specificity_score(query_weights, fact)
+    for idx, raw_fact in enumerate(clean_pool):
+        plain_f = format_fact_for_display(raw_fact, include_badge=False)
+        score = _compute_stem_specificity_score(query_weights, plain_f)
         if score >= min_specificity_score:
-            scored.append((score, idx, fact))
+            ret_boost = 0.80 + 0.40 * (min(100.0, compute_ebbinghaus_retention(raw_fact)) / 100.0)
+            scored.append((score * ret_boost, idx, plain_f))
 
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [f for _, _, f in scored[:max_items]]
@@ -1440,7 +1495,9 @@ def build_active_user_context_block(
     is_spontaneous: bool = False,
     persona_prompt: str = "",
     other_bot_names: set[str] | list[str] | None = None,
-    my_bot_name: str = ""
+    my_bot_name: str = "",
+    shared_cache_file: str = "",
+    channel_id: int = 0,
 ) -> str:
     """
     Builds a comprehensive, 100% generic Situational & Relationship Radar for the system prompt:
@@ -1583,30 +1640,36 @@ def build_active_user_context_block(
             non_rapport = [x for x in non_rapport if not TRANSIENT_BEHAVIORAL_GRUDGE_REGEX.search(x)]
 
         if is_recall_q and not is_spontaneous:
-            return non_rapport[-max_count:]
+            return [format_fact_for_display(x, include_badge=False) for x in non_rapport[-max_count:]]
 
         core_facts = []
         if include_core_identity:
             for f_str in non_rapport:
-                if CORE_IDENTITY_FACT_REGEX.search(f_str) and f_str not in core_facts:
-                    core_facts.append(f_str)
-            core_facts = core_facts[-3:]
+                info = unpack_salience_fact(f_str)
+                clean_txt = info["text"]
+                if (info["salience"] >= 90 or info["category"] in ("CORE", "BOUNDARY") or CORE_IDENTITY_FACT_REGEX.search(clean_txt)):
+                    if clean_txt not in core_facts:
+                        core_facts.append(clean_txt)
+            core_facts = core_facts[-4:]
 
         scored = []
         for idx, f_str in enumerate(non_rapport):
-            if f_str in core_facts:
+            clean_txt = format_fact_for_display(f_str, include_badge=False)
+            if clean_txt in core_facts:
                 continue
-            sc = _compute_stem_specificity_score(query_weights, f_str)
+            sc = _compute_stem_specificity_score(query_weights, clean_txt)
             if sc >= 1.5:
-                scored.append((sc, idx, f_str))
+                ret_mult = 0.80 + 0.40 * (min(100.0, compute_ebbinghaus_retention(f_str)) / 100.0)
+                scored.append((sc * ret_mult, idx, clean_txt))
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         topical_matches = [f for _, _, f in scored[:max_count]]
 
         recent_situational = []
         if include_core_identity and not is_spontaneous and len(topical_matches) < 2:
             for f_str in reversed(non_rapport[-3:]):
-                if f_str not in core_facts and f_str not in topical_matches and f_str not in recent_situational:
-                    recent_situational.append(f_str)
+                clean_txt = format_fact_for_display(f_str, include_badge=False)
+                if clean_txt not in core_facts and clean_txt not in topical_matches and clean_txt not in recent_situational:
+                    recent_situational.append(clean_txt)
                 if len(recent_situational) >= 2:
                     break
 
@@ -1719,12 +1782,23 @@ def build_active_user_context_block(
     if social_contrast_notes:
         lines.append(f"- **Room Relationship Contrast**: {social_contrast_notes[0]}")
 
-    if not lines:
+    sub_block = ""
+    if shared_cache_file:
+        sub_block, _ = build_subconscious_context_injection(
+            shared_cache_file=shared_cache_file,
+            channel_id=channel_id,
+            bot_name=my_bot_name,
+            current_speaker=current_speaker,
+            is_speaker_bot=is_speaker_fellow_bot,
+        )
+
+    if not lines and not sub_block:
         return ""
     return (
         "\n\n### Live Situational Awareness, Room Social Graph & Dossier (PASSIVE REFERENCE ONLY — "
         "let your Disposition, Archetype, and the Immediate Situation shape your tone naturally, and NEVER shoehorn unrelated saved facts!):\n"
         + "\n".join(lines)
+        + sub_block
     )
 
 
@@ -2219,7 +2293,8 @@ def build_api_messages_from_history(
             # turns in history—leaving old media tags in assistant turns causes the LLM to
             # spam unsolicited memes on every turn and fixate on the old visual prompt!
             if own_text:
-                api_messages.append({"role": "assistant", "content": own_text})
+                react_footer = format_message_reactions_footer(msg.get("reactions"))
+                api_messages.append({"role": "assistant", "content": f"{own_text}{react_footer}"})
             if glitch_summary and idx >= len(raw_history) - 10:
                 api_messages.append({
                     "role": "system",
@@ -2287,7 +2362,8 @@ def build_api_messages_from_history(
                     count=1
                 )
 
-            api_messages.append({"role": "user", "content": other_text})
+            react_footer = format_message_reactions_footer(msg.get("reactions"))
+            api_messages.append({"role": "user", "content": f"{other_text}{react_footer}"})
             if glitch_summary and idx >= len(raw_history) - 10:
                 api_messages.append({
                     "role": "system",
@@ -2358,13 +2434,22 @@ def build_api_messages_from_history(
         "NEVER output two separate turns on two lines, and NEVER write meta-stage notes like '[No response—...]'!"
     )
 
+    # Upgrade #6 — Kolmogorov Complexity (zlib NCD < 0.42) Structural Anti-Loop Detector
+    is_ncd_loop, min_ncd_val = detect_ncd_structural_loop(own_recent_texts, threshold=0.42)
+    if is_ncd_loop:
+        variety_rules.append(
+            f"- **MANDATORY STRUCTURAL & CADENCE PIVOT (zlib NCD={min_ncd_val:.2f} < 0.42)**: Your last few responses had nearly identical sentence structure and cadence! "
+            "Completely change your sentence length, rhythm, and opening structure on this turn."
+        )
+
     if variety_rules:
         api_messages[0]["content"] += (
             "\n\n### Dynamic Spontaneity, Variety & Anti-Repetition Rules (Active This Turn):\n"
             + "\n".join(variety_rules)
         )
 
-    return api_messages
+    # Upgrade #11 — Dynamic Token-Budgeted Context Slicer (~3,500 tokens / 14,000 chars)
+    return enforce_dynamic_token_budget(api_messages, max_char_budget=14000, keep_recent_intact=12)
 
 
 def upsert_chat_memory_entry(chat_memory_file: str, channel_id: int, entry: dict, max_history_length: int = 200):

@@ -1,5 +1,8 @@
 import re
+import math
 import time
+import random
+import asyncio
 import discord
 
 from config import (
@@ -10,8 +13,11 @@ from config import (
     AFFECTION_GIFT_OR_CARE_REGEX, SITUATIONAL_SHARED_BOND_REGEX,
     PLAYFUL_BANTER_OR_RIVALRY_REGEX, RELATIONSHIP_QUERY_REGEX
 )
-from core_system import load_json_file, update_json_file, post_with_backoff, is_model_circuit_open
-from memory_and_context import normalize_tokens
+from core_system import (
+    load_json_file, update_json_file, post_with_backoff,
+    is_model_circuit_open, rank_models_by_ewma_latency
+)
+from memory_and_context import normalize_tokens, get_user_affinity_score
 
 # ==============================================================================
 # PRE-COMPILED REGEXES & CONSTANTS FOR BOT DISCOVERY & FOLLOW-UP ROUTING
@@ -511,8 +517,8 @@ def is_command_directed_at_other_bot(
 
     # 1. Multi-bot & explicit self-addressing check:
     # If THIS bot is explicitly @mentioned or referenced by name/keyword anywhere in the message
-    # AND is NOT merely the object of a target preposition ("draw a picture of malfoid", "tell me about uwu"),
-    # then this bot IS being addressed (even if another bot was named first, e.g. "hey uwu and kitty!").
+    # AND is NOT merely the object of a target preposition ("draw a picture of steward", "tell me about kitty"),
+    # then this bot IS being addressed (even if another bot was named first, e.g. "hey steward and kitty!").
     explicitly_mentions_me_as_addressee = False
     if any(getattr(u, "id", None) == my_bot_id for u in getattr(message, "mentions", [])):
         # Verify the @mention isn't solely after a target preposition ("of @BotName")
@@ -666,10 +672,13 @@ async def check_followup_relevance_via_api(
         "Reply with exactly one word: YES or NO."
     )
     endpoint_label = api_url.rsplit("/", 1)[-1] if api_url else "completions"
-    active_model = text_model
-    if is_model_circuit_open(f"{endpoint_label}:{text_model}"):
-        for fb_m in FALLBACK_TEXT_MODELS:
-            if fb_m != text_model:
+    # Smart Model Routing: Use fast Qwen/Qwen3-30B-A3B (FALLBACK_TEXT_MODELS[0]) for Stage-3 follow-up classification
+    fast_default = FALLBACK_TEXT_MODELS[0] if FALLBACK_TEXT_MODELS else text_model
+    active_model = fast_default
+    if is_model_circuit_open(f"{endpoint_label}:{active_model}"):
+        candidate_pool = rank_models_by_ewma_latency(list(FALLBACK_TEXT_MODELS) + [text_model], endpoint_label)
+        for fb_m in candidate_pool:
+            if fb_m != active_model and not is_model_circuit_open(f"{endpoint_label}:{fb_m}"):
                 active_model = fb_m
                 break
 
@@ -1037,16 +1046,45 @@ def compute_spontaneous_interest_multiplier(
     elif -34 <= speaker_affinity <= -10:
         mult *= 0.82
 
-    # Check how recently this bot or ANOTHER bot spoke so bots don't monopolize chat
-    # or barge unprompted into another bot's active 1-on-1 conversation
+    # Upgrade #9 — Self-Exciting Hawkes Process Intensity + Progressive Pity Timer (+1.5%/msg)
     if chat_history_list:
+        now_ts = time.time()
+        # A) Self-Exciting Hawkes Process: lambda(t) = sum_{t_k < t} alpha * exp(-beta * (t - t_k))
+        # Excites spontaneous chime-in probability when rapid multi-human banter is happening in the room
+        hawkes_excitation = 0.0
+        alpha = 0.18
+        beta = 0.035  # ~20s half-life decay
+        for m in chat_history_list[-12:]:
+            if not isinstance(m, dict) or m.get("role") == "system" or m.get("author_is_bot"):
+                continue
+            m_ts = m.get("timestamp")
+            if isinstance(m_ts, (int, float)):
+                dt = max(0.0, now_ts - float(m_ts))
+                if dt <= 180.0:
+                    hawkes_excitation += alpha * math.exp(-beta * dt)
+        mult += min(0.55, hawkes_excitation)
+
+        # B) Progressive Pity Timer (+1.5% per unprompted message since this bot last spoke, capped at +45%)
+        msgs_since_self = 0
+        for m in reversed(chat_history_list[-35:]):
+            if not isinstance(m, dict) or m.get("role") == "system":
+                continue
+            if m.get("author_id") == my_bot_id:
+                break
+            msgs_since_self += 1
+        if msgs_since_self >= 3:
+            pity_boost = min(0.45, msgs_since_self * 0.015)
+            mult *= (1.0 + pity_boost)
+
+        # Check how recently this bot or ANOTHER bot spoke so bots don't monopolize chat
+        # or barge unprompted into another bot's active 1-on-1 conversation
         recent_non_sys = [m for m in chat_history_list[-6:] if m.get("role") != "system"]
         if recent_non_sys and recent_non_sys[-1].get("author_id") == my_bot_id:
             mult *= 0.40
         elif is_other_bot_in_active_exchange(chat_history_list, my_bot_id, window_seconds=28.0):
             mult *= 0.18
 
-    return max(0.05, min(2.45, mult))
+    return max(0.05, min(2.65, round(mult, 4)))
 
 
 def detect_addressed_bot_name(
@@ -1132,7 +1170,7 @@ def detect_addressed_bot_name(
                 seen_canonical_bots.add(canon_key)
                 addressed_bots_ordered.append((start_pos, end_pos - start_pos, bot_disp))
 
-    # If 2+ distinct bots are addressed in the same message (e.g., "hey uwu and kitty"),
+    # If 2+ distinct bots are addressed in the same message (e.g., "hey steward and kitty"),
     # return None so history does NOT mark it as "(speaking to BotA, NOT to BotB)"!
     if len(addressed_bots_ordered) >= 2:
         return None
@@ -1147,3 +1185,152 @@ def detect_addressed_bot_name(
             return ref_author.display_name.strip()
 
     return None
+
+
+# ==============================================================================
+# TWO-WAVE MULTI-BOT CO-STAR COORDINATION (3–50 BOT SCALE) & MINI-SKIT TARGETING
+# ==============================================================================
+async def claim_or_coordinate_turn_wave(
+    shared_image_cache_file: str,
+    message_id: int | str,
+    my_bot_id: int,
+    my_display_name: str,
+    clean_content: str = "",
+    max_collective_responders: int = 3,
+    max_wave1_wait_sec: float = 2.2,
+) -> tuple[bool, int]:
+    """
+    Two-Wave Multi-Bot Co-Star Coordination & Collective Crowd Cap (10–50 Bot Scale):
+    1. If the user used a collective greeting ('hey bots', 'all bots'), caps total
+       responders at `max_collective_responders` (3) via `_collective_turn_claims`.
+    2. Assigns each responding bot a wave slot in `_active_turn_wave[str(message_id)]`:
+       - Slot 0 (Wave 1 Lead Anchor): returns `(True, 0)` immediately (0ms wait).
+       - Slot >= 1 (Wave 2 Co-Star Riff Wave): waits in parallel on Wave 1 ONLY
+         (polling up to `max_wave1_wait_sec` = 2.2s max until Wave 1 finishes posting),
+         then returns `(True, slot_idx)` so all Wave 2 bots wake up simultaneously,
+         reload `chat_memory.json` to see Bot 1's joke, and riff without serial N*2.5s lag!
+    """
+    if not shared_image_cache_file or not message_id:
+        return True, 0
+
+    msg_key = str(message_id)
+    is_collective = bool(COLLECTIVE_BOT_ADDRESS_REGEX.search((clean_content or "").strip()))
+    holder = {"allowed": True, "slot": 0}
+    now_val = time.time()
+
+    def _claim_slot(cache: dict) -> dict:
+        if is_collective:
+            col_map = cache.setdefault("_collective_turn_claims", {})
+            # Prune old entries (> 120s)
+            for k in [k for k, v in col_map.items() if isinstance(v, dict) and (now_val - float(v.get("ts", 0))) > 120.0]:
+                col_map.pop(k, None)
+            col_entry = col_map.setdefault(msg_key, {"bots": [], "ts": now_val})
+            bot_list = col_entry.setdefault("bots", [])
+            if my_bot_id not in bot_list:
+                if len(bot_list) >= max_collective_responders:
+                    holder["allowed"] = False
+                    return cache
+                bot_list.append(my_bot_id)
+
+        wave_map = cache.setdefault("_active_turn_wave", {})
+        for k in [k for k, v in wave_map.items() if isinstance(v, dict) and (now_val - float(v.get("ts", 0))) > 120.0]:
+            wave_map.pop(k, None)
+
+        w_entry = wave_map.setdefault(
+            msg_key,
+            {"order": [], "wave1_bot_id": None, "wave1_done": False, "ts": now_val},
+        )
+        order_list = w_entry.setdefault("order", [])
+        if my_bot_id not in order_list:
+            order_list.append(my_bot_id)
+        slot_idx = order_list.index(my_bot_id)
+        if slot_idx == 0:
+            w_entry["wave1_bot_id"] = my_bot_id
+        holder["slot"] = slot_idx
+        return cache
+
+    update_json_file(shared_image_cache_file, {}, _claim_slot)
+    if not holder["allowed"]:
+        return False, -1
+
+    slot_idx = holder["slot"]
+    if slot_idx == 0:
+        return True, 0
+
+    # Wave 2 Co-Star: wait up to max_wave1_wait_sec (2.2s) for Wave 1 Lead Anchor to post
+    deadline = time.monotonic() + max_wave1_wait_sec
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.18)
+        snap = load_json_file(shared_image_cache_file, {})
+        w_info = snap.get("_active_turn_wave", {}).get(msg_key, {})
+        if isinstance(w_info, dict) and w_info.get("wave1_done"):
+            break
+
+    return True, slot_idx
+
+
+def mark_turn_wave_complete(
+    shared_image_cache_file: str,
+    message_id: int | str,
+    my_bot_id: int,
+):
+    """
+    Marks Wave 1 (`wave1_done = True`) in `_active_turn_wave[str(message_id)]` as soon
+    as the Lead Anchor bot posts its reply so any waiting Wave 2 Co-Star bots wake up immediately.
+    """
+    if not shared_image_cache_file or not message_id:
+        return
+    msg_key = str(message_id)
+
+    def _mark_done(cache: dict) -> dict:
+        wave_map = cache.get("_active_turn_wave", {})
+        if isinstance(wave_map, dict) and msg_key in wave_map:
+            w_entry = wave_map[msg_key]
+            if isinstance(w_entry, dict):
+                if w_entry.get("wave1_bot_id") == my_bot_id or (w_entry.get("order") or [None])[0] == my_bot_id:
+                    w_entry["wave1_done"] = True
+        return cache
+
+    update_json_file(shared_image_cache_file, {}, _mark_done)
+
+
+def pick_fellow_bot_interaction_target(
+    shared_image_cache_file: str,
+    my_bot_id: int,
+    user_profiles: dict | None = None,
+    persona_prompt: str = "",
+    guild_members: list | None = None,
+) -> dict | None:
+    """
+    Phase 2 — Autonomous Multi-Bot Mini-Skit Target Picker:
+    Selects an active fellow bot in the server for spontaneous 2-turn idle banter,
+    weighting selection toward bots with strong positive Affinity (Bonded Companions / Allies)
+    or strong negative Affinity (Comedic Foils / Rivals) so inter-bot skits have maximum chemistry.
+    Returns `{"bot_id": int, "display_name": str, "affinity": int}` or `None`.
+    """
+    other_bots = get_other_active_bots(shared_image_cache_file, my_bot_id, guild_members)
+    if not other_bots:
+        return None
+
+    weighted_pool = []
+    for ob in other_bots:
+        b_name = str(ob.get("display_name", "") or "").strip()
+        b_id = ob.get("bot_id")
+        if not b_name or not b_id:
+            continue
+        aff = get_user_affinity_score(user_profiles or {}, b_name, persona_prompt=persona_prompt)
+        # Weight base 10 + abs(affinity) so allies (+50) and rivals (-25) are favored over strangers (0)
+        weight = max(5.0, 10.0 + abs(float(aff)))
+        weighted_pool.append((weight, {"bot_id": b_id, "display_name": b_name, "affinity": aff}))
+
+    if not weighted_pool:
+        return None
+
+    total_w = sum(w for w, _ in weighted_pool)
+    pick_val = random.uniform(0.0, total_w)
+    upto = 0.0
+    for w, item in weighted_pool:
+        upto += w
+        if upto >= pick_val:
+            return item
+    return weighted_pool[-1][1]

@@ -322,6 +322,20 @@ EXPLICIT_MEME_REQ_REGEX = re.compile(
     r'|\b(meme\s+(?:of|about|for|when|where))\b',
     re.IGNORECASE
 )
+IMAGE_REMIX_REQ_REGEX = re.compile(
+    r'\b(?:'
+    r'remix(?:\s+this|\s+it|\s+that)?|'
+    r're[\s\-]?imagine(?:\s+this|\s+it|\s+that)?|'
+    r'restyle(?:\s+this|\s+it|\s+that)?|'
+    r'redraw\s+(?:this|it|that)|'
+    r'recreate\s+(?:this|it|that)|'
+    r'turn\s+(?:this|it|that)(?:\s+(?:image|pic|picture|photo|drawing|meme|art))?\s+into|'
+    r'make\s+(?:this|it|that)(?:\s+(?:image|pic|picture|photo|drawing|meme|art))?\s+(?:look\s+like|into|in\s+[a-z0-9_\-]+\s+style|more\s+)|'
+    r'(?:draw|paint|render|generate|do)\s+(?:this|it|that|your\s+(?:own\s+)?version)\s+(?:in|as|with|like|but)|'
+    r'edit\s+(?:this|that)\s+(?:image|pic|picture|photo|drawing|meme)'
+    r')\b',
+    re.IGNORECASE
+)
 EXPLICIT_IMAGE_REQ_REGEX = re.compile(
     r'\b(generate|draw|render|make|create|show|give|send|paint|sketch|conjure|summon|snap|take|wheres|where is|still no)\b'
     r'(?:\s+(?:me|us|a|an|and|some|the|another))?[^\n]{0,50}'

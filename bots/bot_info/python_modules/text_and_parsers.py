@@ -1,4 +1,6 @@
 import re
+import ast
+import math
 from config import (
     VOICE_START_REGEX, MIMO_AUDIO_TAG_MAP, URL_REGEX, IMAGE_GEN_REGEX,
     UNCLOSED_IMAGE_GEN_REGEX, GIF_STRIP_REGEX, TTS_KAOMOJI_STRIP_REGEX,
@@ -66,8 +68,27 @@ LEAKED_CONTEXT_TAG_REGEX = re.compile(
 )
 
 TRAILING_META_NOTE_REGEX = re.compile(
-    r'(?:\s*\((?:Note|OOC|Meta|Author[\'’]?s?\s*Note|System|Internal\s*Thought|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\)]*\)\s*'
-    r'|\s*\[(?:Note|OOC|Meta|Internal\s*Thought|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\]]*\]\s*)+$',
+    r'(?:\s*\((?:Note|OOC|Meta|Author[\'’]?s?\s*Note|System|Internal\s*Thought|Thought|Subtext|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\)]*\)\s*'
+    r'|\s*\[(?:Note|OOC|Meta|Internal\s*Thought|Thought|Subtext|Disposition|Rapport|Affinity|Relationship|Catalyst|Archetype)\s*:[^\]]*\]\s*)+$',
+    re.IGNORECASE
+)
+
+# Matches hidden inner-monologue tags ([THOUGHT: ...] or [SUBTEXT: ...]) so bots can reason before speaking
+THOUGHT_START_REGEX = re.compile(r'\[\s*(?:THOUGHT|SUBTEXT|INTERNAL_THOUGHT)\s*:\s*', re.IGNORECASE)
+THOUGHT_INLINE_STRIP_REGEX = re.compile(
+    r'\[\s*(?:THOUGHT|SUBTEXT|INTERNAL_THOUGHT)\s*:[^\]]*(?:\]|$)',
+    re.IGNORECASE
+)
+
+# Crown Jewel #6 — Persona-Signature Drift Guard: strips generic AI-assistant stock openings
+GENERIC_ASSISTANT_DRIFT_REGEX = re.compile(
+    r'^\s*(?:'
+    r'(?:certainly|sure\s+thing|absolutely|of\s+course)[!,.]\s+'
+    r'(?:here(?:[\'’]s|\s+is)\s+(?:a|the|how|what|your)\b[^.!:\n]*[:.!]|i[\'’]?d\s+be\s+happy\s+to\s+help[^.!:\n]*[:.!]|let\s+me\s+(?:help|break\s+that\s+down|explain)[^.!:\n]*[:.!])\s*'
+    r'|i[\'’]?d\s+be\s+(?:more\s+than\s+)?happy\s+to\s+(?:help|explain|assist)[^.!:\n]*[:.!]\s*'
+    r'|as\s+an\s+ai(?:\s+language\s+model|\s+assistant)?[,\s]+i\b[^.!?\n]*[.!?]\s*'
+    r'|great\s+question!\s+(?:here(?:[\'’]s|\s+is)\s+how[^.!:\n]*[:.!]\s*)?'
+    r')',
     re.IGNORECASE
 )
 
@@ -170,6 +191,69 @@ def _heal_unclosed_trailing_emote(line: str) -> str:
         if UNCLOSED_TRAILING_EMOTE_REGEX.search(line):
             return f"{line.rstrip()}*"
     return line
+
+
+def extract_and_strip_thought_tag(text: str) -> tuple[str | None, str]:
+    """
+    Extracts and strips optional `[THOUGHT: ...]` or `[SUBTEXT: ...]` hidden inner-monologue
+    blocks emitted by the LLM before its spoken response, rescuing any accidentally nested
+    media or learning tags (`[IMAGE_GEN:]`, `[MEME_GEN:]`, `[GIF:]`, `[LEARN*:]`).
+    Returns `(thought_str_or_None, cleaned_reply_text)`.
+    """
+    if not text:
+        return None, ""
+
+    match = THOUGHT_START_REGEX.search(text)
+    if not match:
+        return None, text
+
+    thoughts_collected = []
+    working = text
+    max_iters = 3
+    for _ in range(max_iters):
+        m = THOUGHT_START_REGEX.search(working)
+        if not m:
+            break
+        start_idx = m.start()
+        content_start = m.end()
+        depth = 1
+        i = content_start
+        while i < len(working) and depth > 0:
+            if working[i] == '[':
+                depth += 1
+            elif working[i] == ']':
+                depth -= 1
+            i += 1
+
+        if depth == 0:
+            raw_thought = working[content_start:i - 1].strip()
+            working = (working[:start_idx] + " " + working[i:]).strip()
+        else:
+            # Unclosed [THOUGHT: ... — stop at first newline or take up to 180 chars
+            nl_pos = working.find("\n", content_start)
+            if nl_pos != -1:
+                raw_thought = working[content_start:nl_pos].strip()
+                working = (working[:start_idx] + " " + working[nl_pos + 1:]).strip()
+            else:
+                raw_thought = working[content_start:].strip()
+                working = working[:start_idx].strip()
+
+        if raw_thought:
+            rescued = []
+            for m_tag in RESCUABLE_EMBEDDED_TAG_REGEX.finditer(raw_thought):
+                t_str = m_tag.group(0).strip()
+                if not t_str.endswith("]"):
+                    t_str += "]"
+                rescued.append(t_str)
+            if rescued:
+                raw_thought = RESCUABLE_EMBEDDED_TAG_REGEX.sub('', raw_thought).strip()
+                working = f"{working} {' '.join(rescued)}".strip()
+            if raw_thought:
+                thoughts_collected.append(MULTI_SPACE_REGEX.sub(' ', raw_thought))
+
+    final_thought = " | ".join(thoughts_collected)[:240].strip() if thoughts_collected else None
+    working = THOUGHT_INLINE_STRIP_REGEX.sub('', working).strip()
+    return (final_thought if final_thought else None), working
 
 
 def extract_and_strip_voice_msg(text: str) -> tuple[str | None, str]:
@@ -305,6 +389,7 @@ def parse_mimotts_voice_block(
     assistant_speech_content = LEARN_GENERAL_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEARN_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEAKED_CONTEXT_TAG_REGEX.sub('', assistant_speech_content)
+    assistant_speech_content = THOUGHT_INLINE_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = TRAILING_META_NOTE_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = MEME_GEN_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = UNCLOSED_MEME_GEN_REGEX.sub('', assistant_speech_content)
@@ -363,7 +448,7 @@ def convert_bracket_emotes_to_asterisks(text: str) -> str:
                 "attached", "contains", "system", "replying", "addressed", "directed",
                 "learn", "no response", "linked webpage", "note:", "ooc:", "meta:",
                 "disposition:", "rapport:", "affinity:", "relationship:", "catalyst:",
-                "archetype:", "social contrast:"
+                "archetype:", "social contrast:", "thought:", "subtext:", "internal_thought:"
             ))
             or "speaking to" in lower_inner
             or "fellow bot" in lower_inner
@@ -450,6 +535,7 @@ def clean_and_compact_reply(reply: str) -> str:
     reply = LEARN_USER_STRIP_REGEX.sub('', reply)
     reply = LEARN_GENERAL_STRIP_REGEX.sub('', reply)
     reply = LEARN_STRIP_REGEX.sub('', reply)
+    _, reply = extract_and_strip_thought_tag(reply)
     reply = IMAGE_DESC_STRIP_REGEX.sub('', reply)
     reply = LEAKED_CONTEXT_TAG_REGEX.sub('', reply)
     reply = TRAILING_META_NOTE_REGEX.sub('', reply)
@@ -459,6 +545,11 @@ def clean_and_compact_reply(reply: str) -> str:
 
     # 2. Strip echoed short user input prefixes like `erm : *glances up*` or `um : *sighs*`
     reply = ECHOED_INPUT_PREFIX_REGEX.sub('', reply).strip()
+
+    # 2b. Crown Jewel #6 — Persona-Signature Drift Guard (strips robotic assistant openings if substantive reply follows)
+    drift_stripped = GENERIC_ASSISTANT_DRIFT_REGEX.sub('', reply).strip()
+    if len(drift_stripped) >= 12:
+        reply = drift_stripped
 
     # 3. Truncate any hallucinated multi-turn continuation
     cutoff_match = HALLUCINATED_MULTI_TURN_CUTOFF_REGEX.search(reply)
@@ -584,3 +675,202 @@ def parse_meme_gen_tag(raw_meme_str: str) -> tuple[str, str, str]:
         bottom_text = ""
 
     return visual_prompt, top_text, bottom_text
+
+
+# ==============================================================================
+# 0MS DETERMINISTIC LOCAL GROUNDING MICRO-TOOLS (MATH, UNITS & PYTHON AST CHECK)
+# ==============================================================================
+_SAFE_MATH_FUNCS = {
+    "sqrt": math.sqrt,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "log": math.log,
+    "log10": math.log10,
+    "log2": math.log2,
+    "ceil": math.ceil,
+    "floor": math.floor,
+    "abs": abs,
+    "round": round,
+}
+_SAFE_MATH_CONSTS = {
+    "pi": math.pi,
+    "e": math.e,
+}
+
+_FENCED_PYTHON_BLOCK_REGEX = re.compile(
+    r'```(?:python|py)\s*\n([\s\S]{4,4000}?)```',
+    re.IGNORECASE
+)
+_PERCENT_OF_REGEX = re.compile(
+    r'\b(\d+(?:\.\d+)?)\s*%\s+of\s+(\d+(?:,\d{3})*(?:\.\d+)?)\b',
+    re.IGNORECASE
+)
+_MATH_ATOM_PAT = r'(?:(?:sqrt|log10|log2|log|sin|cos|tan|ceil|floor|abs|round)\s*\([^\)\n]{1,35}\)|\(?\s*\-?\d+(?:,\d{3})*(?:\.\d+)?\s*\)?)'
+_ARITHMETIC_EXPR_REGEX = re.compile(
+    r'(?<![a-zA-Z0-9_/\\\-])'
+    rf'(?:{_MATH_ATOM_PAT}\s*(?:\*\*|\^|[\+\-\*/%])\s*){{1,6}}{_MATH_ATOM_PAT}'
+    rf'|(?:sqrt|log10|log2|log|sin|cos|tan|ceil|floor)\s*\([^\)\n]{{1,35}}\)',
+    re.IGNORECASE
+)
+_DATE_OR_VERSION_SKIP_REGEX = re.compile(
+    r'^\d{1,4}[\-/]\d{1,2}[\-/]\d{1,4}$|^\d+\.\d+\.\d+$'
+)
+_UNIT_CONV_REGEX = re.compile(
+    r'\b(\-?\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(°?[fc]|fahrenheit|celsius|miles?|mi|kilometers?|km|lbs?|pounds?|kg|kilograms?)\b'
+    r'(?:\s+(?:in|to|into|as)\s+(°?[fc]|fahrenheit|celsius|miles?|mi|kilometers?|km|lbs?|pounds?|kg|kilograms?))?',
+    re.IGNORECASE
+)
+
+
+def _eval_safe_ast_node(node, depth: int = 0) -> float | int:
+    if depth > 14:
+        raise ValueError("Expression too deep")
+    if isinstance(node, ast.Expression):
+        return _eval_safe_ast_node(node.body, depth + 1)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        if abs(node.value) > 1e18:
+            raise ValueError("Operand magnitude too large")
+        return node.value
+    if isinstance(node, ast.Name) and node.id.lower() in _SAFE_MATH_CONSTS:
+        return _SAFE_MATH_CONSTS[node.id.lower()]
+    if isinstance(node, ast.UnaryOp):
+        val = _eval_safe_ast_node(node.operand, depth + 1)
+        if isinstance(node.op, ast.USub):
+            return -val
+        if isinstance(node.op, ast.UAdd):
+            return +val
+        raise ValueError("Unsupported unary op")
+    if isinstance(node, ast.BinOp):
+        left = _eval_safe_ast_node(node.left, depth + 1)
+        right = _eval_safe_ast_node(node.right, depth + 1)
+        if isinstance(node.op, ast.Add):
+            res = left + right
+        elif isinstance(node.op, ast.Sub):
+            res = left - right
+        elif isinstance(node.op, ast.Mult):
+            res = left * right
+        elif isinstance(node.op, ast.Div):
+            if right == 0:
+                raise ZeroDivisionError("division by zero")
+            res = left / float(right)
+        elif isinstance(node.op, ast.FloorDiv):
+            if right == 0:
+                raise ZeroDivisionError("division by zero")
+            res = left // right
+        elif isinstance(node.op, ast.Mod):
+            if right == 0:
+                raise ZeroDivisionError("modulo by zero")
+            res = left % right
+        elif isinstance(node.op, ast.Pow):
+            if abs(right) > 1000 or (abs(left) > 1e6 and abs(right) > 12):
+                raise ValueError("Exponent too large")
+            res = left ** right
+        else:
+            raise ValueError("Unsupported binary op")
+        if abs(res) > 1e24:
+            raise ValueError("Result overflow")
+        return res
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        fn_name = node.func.id.lower()
+        if fn_name in _SAFE_MATH_FUNCS and 1 <= len(node.args) <= 2 and not node.keywords:
+            eval_args = [_eval_safe_ast_node(a, depth + 1) for a in node.args]
+            return _SAFE_MATH_FUNCS[fn_name](*eval_args)
+    raise ValueError("Unsupported AST node")
+
+
+def evaluate_deterministic_grounding_tools(user_text: str) -> str:
+    """
+    0ms Local Grounding Micro-Tools (Zero network calls, 100% deterministic):
+    1. Safe AST Arithmetic & Percentage Evaluator
+    2. Instant Unit & Temperature Converter (°F <-> °C, mi <-> km, lbs <-> kg)
+    3. Fenced Python Code-Block Syntax & Traceback Inspector (`ast.parse`)
+    Returns a compact `[System Verified Grounding: ...]` block when a match is found, or `""`.
+    """
+    if not user_text or not isinstance(user_text, str):
+        return ""
+
+    notes = []
+
+    # 1. Inspect fenced Python code blocks for syntax errors in 0ms
+    for py_match in _FENCED_PYTHON_BLOCK_REGEX.finditer(user_text):
+        code_snippet = py_match.group(1).strip()
+        if not code_snippet:
+            continue
+        try:
+            ast.parse(code_snippet)
+            notes.append("Python code block syntax check: VALID (0 syntax errors in AST)")
+        except SyntaxError as syn_err:
+            err_ln = (syn_err.text or "").strip()[:70]
+            notes.append(
+                f"Python SyntaxError on line {syn_err.lineno}, col {syn_err.offset}: {syn_err.msg}"
+                + (f" -> `{err_ln}`" if err_ln else "")
+            )
+        break
+
+    text_no_code = _FENCED_PYTHON_BLOCK_REGEX.sub(' ', user_text)
+    text_no_urls = URL_REGEX.sub(' ', text_no_code)
+
+    # 2. Percentage expressions ("15% of 340")
+    for pm in _PERCENT_OF_REGEX.finditer(text_no_urls):
+        try:
+            pct = float(pm.group(1))
+            base_val = float(pm.group(2).replace(",", ""))
+            ans = (pct / 100.0) * base_val
+            ans_str = f"{int(ans)}" if ans == int(ans) else f"{ans:.4f}".rstrip("0").rstrip(".")
+            notes.append(f"{pm.group(0).strip()} = {ans_str}")
+        except Exception:
+            pass
+        if len(notes) >= 4:
+            break
+
+    # 3. Safe AST arithmetic & math expressions
+    for am in _ARITHMETIC_EXPR_REGEX.finditer(text_no_urls):
+        raw_expr = am.group(0).strip()
+        if _DATE_OR_VERSION_SKIP_REGEX.match(raw_expr):
+            continue
+        # Skip simple hyphenated ranges like "30-160" or "1-2" unless math context or other operators exist
+        if re.fullmatch(r'\d+\s*\-\s*\d+', raw_expr) and not re.search(r'\b(?:what\s+is|calculate|equals|minus|math)\b|=', text_no_urls, re.IGNORECASE):
+            continue
+        norm_expr = raw_expr.replace(",", "").replace("^", "**")
+        try:
+            tree = ast.parse(norm_expr, mode="eval")
+            val = _eval_safe_ast_node(tree)
+            if isinstance(val, float):
+                val_str = f"{int(val)}" if val.is_integer() and abs(val) < 1e15 else f"{val:.6g}"
+            else:
+                val_str = str(val)
+            notes.append(f"{raw_expr} = {val_str}")
+        except Exception:
+            continue
+        if len(notes) >= 4:
+            break
+
+    # 4. Unit conversions (when explicitly asked or containing temperature/unit values)
+    if len(notes) < 4 and re.search(r'\b(?:convert|in\s+(?:celsius|fahrenheit|km|miles|kg|lbs)|°[fc]|fahrenheit|celsius)\b', text_no_urls, re.IGNORECASE):
+        for um in _UNIT_CONV_REGEX.finditer(text_no_urls):
+            try:
+                val = float(um.group(1))
+                u_from = um.group(2).lower().lstrip("°")
+                if u_from in ("f", "fahrenheit"):
+                    c_val = (val - 32.0) * 5.0 / 9.0
+                    notes.append(f"{val:g}°F = {c_val:.1f}°C")
+                elif u_from in ("c", "celsius"):
+                    f_val = (val * 9.0 / 5.0) + 32.0
+                    notes.append(f"{val:g}°C = {f_val:.1f}°F")
+                elif u_from in ("mi", "mile", "miles") and um.group(3):
+                    notes.append(f"{val:g} mi = {val * 1.60934:.2f} km")
+                elif u_from in ("km", "kilometer", "kilometers") and um.group(3):
+                    notes.append(f"{val:g} km = {val * 0.621371:.2f} mi")
+                elif u_from in ("lb", "lbs", "pound", "pounds") and um.group(3):
+                    notes.append(f"{val:g} lbs = {val * 0.453592:.2f} kg")
+                elif u_from in ("kg", "kilogram", "kilograms") and um.group(3):
+                    notes.append(f"{val:g} kg = {val * 2.20462:.2f} lbs")
+            except Exception:
+                continue
+            if len(notes) >= 4:
+                break
+
+    if not notes:
+        return ""
+    return "[System Verified Grounding (0ms AST Tool — use naturally in-character if relevant): " + " | ".join(notes[:4]) + "]"
