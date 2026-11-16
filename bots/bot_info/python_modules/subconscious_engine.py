@@ -23,7 +23,7 @@ REUNION_ABSENCE_SECONDS = getattr(config, "REUNION_ABSENCE_SECONDS", 172800.0)  
 REUNION_COOLDOWN_SECONDS = 21600.0  # 6 hours cooldown after a reunion trigger
 EPISODIC_MIN_SESSION_MSGS = getattr(config, "EPISODIC_MIN_SESSION_MSGS", 18)
 MAX_EPISODIC_CHAPTERS = getattr(config, "MAX_EPISODIC_CHAPTERS", 12)
-DEFAULT_SUBCONSCIOUS_MODEL = "Qwen/Qwen3-30B-A3B"
+DEFAULT_SUBCONSCIOUS_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
 ALPHANUM_TOKEN_REGEX = re.compile(r"[a-z0-9]+")
 
@@ -1036,11 +1036,12 @@ def save_bot_thought_subtext(
     channel_id: int,
     bot_name: str,
     thought_text: str,
+    speaker_name: str = "",
 ):
     """
     Saves the stripped `[THOUGHT: ...]` inner monologue from Phase A into
-    `_bot_internal_state` (`ttl=2` turns) so the bot maintains subtext continuity
-    and `orchestrator.py` can stream it to the Live Subconscious X-Ray Inspector.
+    `_bot_internal_state` (`ttl=2` turns) AND immediately appends/updates `_subconscious_xray_log`
+    so every bot's `[THOUGHT:]` streams live to the Web-UI X-Ray tab even when multiple bots reply!
     """
     if not shared_cache_file or not bot_name or not thought_text:
         return
@@ -1049,6 +1050,7 @@ def save_bot_thought_subtext(
         return
     ch_key = str(channel_id or 0)
     bot_key = bot_name.strip()
+    now_val = time.time()
 
     def _mutate(cache: dict) -> dict:
         all_states = cache.setdefault("_bot_internal_state", {})
@@ -1056,7 +1058,26 @@ def save_bot_thought_subtext(
         b_state = ch_states.setdefault(bot_key, {})
         b_state["inner_thought"] = clean_t[:220]
         b_state["thought_ttl"] = 2
-        b_state["updated_at"] = time.time()
+        b_state["updated_at"] = now_val
+
+        room_st = cache.get("_room_state", {}).get(ch_key, {})
+        if not isinstance(room_st, dict):
+            room_st = {}
+        xray_log = cache.setdefault("_subconscious_xray_log", [])
+        if not isinstance(xray_log, list):
+            xray_log = []
+        xray_log.append({
+            "ts": now_val,
+            "channel_id": int(channel_id or 0),
+            "bot": bot_key,
+            "speaker": speaker_name or "User",
+            "thought": clean_t[:180],
+            "mood": str(b_state.get("mood", "Engaged"))[:50],
+            "active_topic": str(room_st.get("active_topic", "Live conversation"))[:70],
+            "room_vibe": str(room_st.get("room_vibe", "Active"))[:40],
+            "facts_learned": 0,
+        })
+        cache["_subconscious_xray_log"] = xray_log[-40:]
         return cache
 
     update_json_file(shared_cache_file, {}, _mutate)
@@ -1183,6 +1204,11 @@ def build_subconscious_context_injection(
 def _extract_balanced_json(raw_text: str) -> str | None:
     if not raw_text:
         return None
+    # Strip closed <think>...</think> blocks and any unclosed <think> prefix before scanning for JSON
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE).strip()
+    if "<think>" in cleaned.lower():
+        cleaned = re.sub(r"<think>[\s\S]*?(?=\{\s*\"user_facts\")", "", cleaned, flags=re.IGNORECASE).strip()
+    raw_text = cleaned
     start = raw_text.find("{")
     if start == -1:
         return None
@@ -1244,7 +1270,7 @@ async def run_subconscious_cognitive_turn(
     # 1. Tick this bot's existing TTL state and record any new [THOUGHT:] subtext
     get_and_tick_bot_internal_state(shared_cache_file, channel_id, my_bot_name, tick_ttl=True)
     if bot_thought_text:
-        save_bot_thought_subtext(shared_cache_file, channel_id, my_bot_name, bot_thought_text)
+        save_bot_thought_subtext(shared_cache_file, channel_id, my_bot_name, bot_thought_text, speaker_name=speaker_name)
 
     # 2. Claim Single-Leader Lock for this trigger_message_id
     leader_holder = {"is_leader": False}
@@ -1356,29 +1382,32 @@ async def run_subconscious_cognitive_turn(
     payload = {
         "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "Output only valid JSON."},
+            {"role": "system", "content": "Output ONLY a single valid JSON object. Do NOT output <think> tags or markdown prose."},
             {"role": "user", "content": sub_prompt},
         ],
         "temperature": 0.15,
-        "max_tokens": 520,
+        "max_tokens": 800,
     }
 
     res = await post_with_backoff(
         api_url,
         headers={"Authorization": f"Bearer {api_key}"},
         json_payload=payload,
-        timeout=(6, 16),
+        timeout=(8, 20),
         max_retries=1,
         bot_name=f"{my_bot_name}:Subconscious",
     )
 
     if not res or res.status_code != 200:
+        st_code = getattr(res, "status_code", "TIMEOUT")
+        print(f"[{my_bot_name}] [SUBCONSCIOUS API WARN] Model '{model_to_use}' returned {st_code}")
         return {"status": "api_skipped", "bot": my_bot_name}
 
     try:
         raw_content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         json_str = _extract_balanced_json(raw_content)
         if not json_str:
+            print(f"[{my_bot_name}] [SUBCONSCIOUS JSON WARN] No balanced JSON found in output ({len(raw_content)} chars)")
             return {"status": "no_json", "bot": my_bot_name}
         parsed = json.loads(json_str)
     except Exception as e:
@@ -1577,11 +1606,11 @@ async def run_subconscious_cognitive_turn(
             else:
                 cnt_map[ch_key] = msgs_since_chapter
 
-            # Save latest Subconscious X-Ray telemetry entry for `orchestrator.py` Web-UI
+            # Save or enrich latest Subconscious X-Ray telemetry entry for `orchestrator.py` Web-UI
             xray_log = cache.setdefault("_subconscious_xray_log", [])
             if not isinstance(xray_log, list):
                 xray_log = []
-            xray_log.append({
+            new_x_entry = {
                 "ts": now_val,
                 "channel_id": int(channel_id or 0),
                 "bot": my_bot_name,
@@ -1591,7 +1620,11 @@ async def run_subconscious_cognitive_turn(
                 "active_topic": str((parsed.get("room_state") or {}).get("active_topic", ""))[:70],
                 "room_vibe": str((parsed.get("room_state") or {}).get("room_vibe", ""))[:40],
                 "facts_learned": len(raw_u_facts) + len(raw_srv) + len(raw_gen),
-            })
+            }
+            if xray_log and isinstance(xray_log[-1], dict) and xray_log[-1].get("bot") == my_bot_name and (now_val - float(xray_log[-1].get("ts", 0))) < 15.0:
+                xray_log[-1].update(new_x_entry)
+            else:
+                xray_log.append(new_x_entry)
             cache["_subconscious_xray_log"] = xray_log[-40:]
             return cache
 

@@ -511,6 +511,6 @@ FALLBACK_VISION_MODELS = [
 ]
 
 FALLBACK_TEXT_MODELS = [
-    "Qwen/Qwen3-30B-A3B",
-    "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "Qwen/Qwen3-30B-A3B"
 ]
