@@ -7,7 +7,8 @@ from config import (
     BRACKET_EMOTE_REGEX, ASTERISK_EMOTE_EXTRACT_REGEX, ERROR_REPLY_STRIP_REGEX,
     IMAGE_DESC_STRIP_REGEX, MEME_GEN_REGEX, UNCLOSED_MEME_GEN_REGEX,
     LEARN_GENERAL_STRIP_REGEX, LEARN_USER_STRIP_REGEX, LEARN_STRIP_REGEX,
-    MEME_PLACEHOLDER_REGEX, INTENTIONAL_NO_RESPONSE_REGEX
+    MEME_PLACEHOLDER_REGEX, INTENTIONAL_NO_RESPONSE_REGEX,
+    REACTION_FOOTER_STRIP_REGEX
 )
 
 # ==============================================================================
@@ -59,6 +60,7 @@ ECHOED_INPUT_PREFIX_REGEX = re.compile(
 
 LEAKED_CONTEXT_TAG_REGEX = re.compile(
     r'\[(?:Replying to [^\]\n]+|Contains (?:GIF|YouTube Video)[^\]\n]*|'
+    r'Reactions on this message:[^\]\n]*|'
     r'Linked Webpage:[^\]\n]*|'
     r'System (?:Visual|Context|Glitch|Time|Memory|Relationship)[^\]\n]*|'
     r'Generated Attached (?:Image|Meme|Voice Audio)[^\]\n]*|'
@@ -113,9 +115,9 @@ RESCUABLE_EMBEDDED_TAG_REGEX = re.compile(
 )
 
 HTML_TAG_STRIP_REGEX = re.compile(r'<[^>]+>')
-SYSTEM_NOTE_STRIP_REGEX = re.compile(r'\*\s*\(System Note:.*?\)\s*\*?\n?', re.IGNORECASE)
+SYSTEM_NOTE_STRIP_REGEX = re.compile(r'\*?\s*\(System Note:[^\n]*?\)\s*\*?\n?', re.IGNORECASE)
 LEARNED_NOTE_STRIP_REGEX = re.compile(
-    r'\*\s*\([^)]*learned (?:server fact|general fact|about).*?\)\s*\*?\n?',
+    r'\*?\s*\([^\n]*?\blearned (?:server fact|general fact|about)\b[^\n]*\)\s*\*?\n?',
     re.IGNORECASE
 )
 EMPTY_CODEBLOCK_REGEX = re.compile(r'```[a-zA-Z]*\s*```')
@@ -388,6 +390,8 @@ def parse_mimotts_voice_block(
     assistant_speech_content = LEARN_USER_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEARN_GENERAL_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEARN_STRIP_REGEX.sub('', assistant_speech_content)
+    assistant_speech_content = REACTION_FOOTER_STRIP_REGEX.sub('', assistant_speech_content)
+    assistant_speech_content = LEARNED_NOTE_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = LEAKED_CONTEXT_TAG_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = THOUGHT_INLINE_STRIP_REGEX.sub('', assistant_speech_content)
     assistant_speech_content = TRAILING_META_NOTE_REGEX.sub('', assistant_speech_content)
@@ -518,11 +522,64 @@ def _prune_excessive_inline_emotes(text: str, max_emotes: int = 2) -> str:
     return pruned
 
 
-def clean_and_compact_reply(reply: str) -> str:
+def _normalize_echo_compare(text: str) -> str:
+    """Normalizes text for case-insensitive, punctuation-tolerant verbatim echo detection."""
+    if not text:
+        return ""
+    s = LEADING_BOT_HEADER_REGEX.sub('', text.strip())
+    s = re.sub(r'[\s\W_]+', ' ', s.lower()).strip()
+    return s
+
+
+def strip_verbatim_user_echo(reply: str, recent_user_messages: list[str] | None = None) -> str:
     """
-    Cleans stray markdown artifacts, leaked context headers, echoed user inputs,
-    novel-style outer quotation marks, hallucinated multi-turn scripts, and
-    self-cloned second turns, converts bracket emotes to asterisks, prunes
+    Prevents a bot from repeating a user's recent message word-for-word (e.g. 'no, fort worth')
+    or echoing the user's message as an unquoted prefix before its own emote/comment
+    (e.g. 'they should AI slop remaster *giggles* only for...').
+    Returns '' if the entire reply is a verbatim echo of a recent user message.
+    """
+    if not reply or not recent_user_messages:
+        return reply
+    cleaned_reply = reply.strip()
+    norm_reply = _normalize_echo_compare(cleaned_reply)
+    if not norm_reply:
+        return ""
+
+    for raw_u in recent_user_messages:
+        if not raw_u or not isinstance(raw_u, str):
+            continue
+        # Strip any speaker prefix or metadata lines from the user message
+        u_lines = [
+            LEADING_BOT_HEADER_REGEX.sub('', ln.strip()).strip()
+            for ln in raw_u.split("\n")
+            if ln.strip() and not ln.strip().startswith(("[Replying to ", "[Attached Media", "[Contains ", "[Linked Webpage:", "[Reactions on"))
+        ]
+        u_clean = " ".join(u_lines).strip()
+        if not u_clean:
+            continue
+        norm_u = _normalize_echo_compare(u_clean)
+        if not norm_u:
+            continue
+
+        # 1. Exact full-message verbatim echo (e.g. Carzen: 'no, fort worth' -> Bot: 'no, fort worth')
+        if norm_reply == norm_u and len(norm_u) >= 2:
+            return ""
+
+        # 2. Unquoted leading prefix echo (e.g. User: 'they should AI slop remaster' -> Bot: 'they should AI slop remaster *giggles* ...')
+        if len(u_clean) >= 8 and cleaned_reply.lower().startswith(u_clean.lower()):
+            remainder = cleaned_reply[len(u_clean):].lstrip(" ,;:-—")
+            if remainder and (remainder.startswith("*") or len(remainder) >= 12):
+                cleaned_reply = remainder
+                norm_reply = _normalize_echo_compare(cleaned_reply)
+
+    return cleaned_reply
+
+
+def clean_and_compact_reply(reply: str, recent_user_messages: list[str] | None = None) -> str:
+    """
+    Cleans stray markdown artifacts, leaked context headers, leaked reaction footers,
+    echoed user inputs, novel-style outer quotation marks, hallucinated multi-turn scripts,
+    and self-cloned second turns, converts bracket emotes to asterisks, prunes
     excessive stage directions, and compacts spacing.
     """
     if not reply:
@@ -532,6 +589,7 @@ def clean_and_compact_reply(reply: str) -> str:
         return ""
 
     reply = ERROR_REPLY_STRIP_REGEX.sub('', reply)
+    reply = REACTION_FOOTER_STRIP_REGEX.sub('', reply)
     reply = LEARN_USER_STRIP_REGEX.sub('', reply)
     reply = LEARN_GENERAL_STRIP_REGEX.sub('', reply)
     reply = LEARN_STRIP_REGEX.sub('', reply)
@@ -596,7 +654,10 @@ def clean_and_compact_reply(reply: str) -> str:
     )
 
     combined = _strip_outer_novel_quotes(combined)
-    return _prune_excessive_inline_emotes(combined, max_emotes=2)
+    combined = _prune_excessive_inline_emotes(combined, max_emotes=2)
+    if recent_user_messages:
+        combined = strip_verbatim_user_echo(combined, recent_user_messages)
+    return combined
 
 
 def _is_placeholder_caption(text: str) -> bool:

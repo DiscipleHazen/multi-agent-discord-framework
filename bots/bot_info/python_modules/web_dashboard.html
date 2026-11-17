@@ -505,6 +505,169 @@
       z-index: 999;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
     }
+
+    .table-scroll-wrap {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border-radius: 8px;
+    }
+    .bot-pill-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding: 10px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      align-items: center;
+    }
+    .bot-pill-chip {
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .bot-pill-chip.active {
+      background: var(--accent);
+      color: #05080d;
+      border-color: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+    .channel-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 9px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .channel-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .channel-name-badge {
+      font-size: 15.5px;
+      font-weight: 800;
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .channel-id-sub {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      background: var(--bg-input);
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    /* MOBILE-FIRST PROFESSIONAL APP RESPONSIVE OVERHAUL */
+    @media (max-width: 768px) {
+      header {
+        padding: 12px 14px;
+        gap: 12px;
+        position: relative;
+      }
+      .brand {
+        width: 100%;
+        font-size: 15px;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .kpi-strip {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+      .kpi-box {
+        min-width: 0;
+        padding: 8px 11px;
+      }
+      .kpi-val {
+        font-size: 16px;
+      }
+      .nav-tabs {
+        padding: 6px 10px 0;
+        gap: 4px;
+        position: sticky;
+        top: 0;
+        z-index: 60;
+        scrollbar-width: none;
+      }
+      .nav-tabs::-webkit-scrollbar { display: none; }
+      .tab-btn {
+        padding: 10px 13px;
+        font-size: 13px;
+      }
+      main {
+        padding: 12px 10px 80px;
+        max-width: 100vw;
+      }
+      .panel {
+        padding: 14px 12px;
+        margin-bottom: 14px;
+        border-radius: 9px;
+      }
+      .panel-title {
+        font-size: 15px;
+        gap: 8px;
+      }
+      .grid-2, .grid-3 {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+      }
+      .metrics-row {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        padding: 10px;
+      }
+      .form-grid {
+        grid-template-columns: 1fr !important;
+        gap: 10px;
+      }
+      .form-grid > div[style*="grid-column"] {
+        grid-column: span 1 !important;
+      }
+      .btn-row {
+        width: 100%;
+        gap: 6px;
+      }
+      button.btn {
+        min-height: 38px;
+        padding: 8px 12px;
+        font-size: 13px;
+      }
+      #socialCanvas {
+        height: 360px;
+      }
+      th, td {
+        padding: 8px 9px;
+        font-size: 12.5px;
+      }
+      .toast {
+        left: 12px;
+        right: 12px;
+        bottom: 14px;
+        text-align: center;
+      }
+    }
   </style>
 </head>
 <body>
@@ -551,10 +714,12 @@
         <div class="panel-title">
           <span>Process Supervisor & Resource Telemetry</span>
           <div class="btn-row">
-            <button class="btn btn-success" onclick="botAction('__ALL__', 'start')">Start All</button>
-            <button class="btn" onclick="botAction('__ALL__', 'restart')">Rolling Restart All</button>
-            <button class="btn btn-danger" onclick="botAction('__ALL__', 'stop')">Stop All</button>
-            <button class="btn" onclick="fetchState()">Refresh</button>
+            <button class="btn btn-success" onclick="botAction('__ALL__', 'start')">▶ Start All</button>
+            <button class="btn" onclick="botAction('__ALL__', 'restart')">🔄 Rolling Restart</button>
+            <button class="btn btn-danger" onclick="botAction('__ALL__', 'stop')">⏹ Stop All</button>
+            <button id="hotReloadBtn" class="btn btn-ghost" onclick="toggleHotReload()" title="Toggle automatic file-watcher hot-reloading">🔥 Hot-Reload: OFF</button>
+            <button class="btn" onclick="fetchState()">↻ Refresh</button>
+            <button class="btn btn-danger" onclick="shutdownOrchestrator()" title="Stop all bots and shut down the background Orchestrator daemon">🛑 Shutdown Server</button>
           </div>
         </div>
         <div id="botCardsGrid" class="grid-3"></div>
@@ -562,8 +727,8 @@
 
       <div class="grid-2">
         <div class="panel">
-          <div class="panel-title"><span>Model Latency & Circuit-Breaker Matrix</span></div>
-          <table>
+          <div class="panel-title"><span>Model Latency & Circuit-Breaker Matrix (Real DeepInfra Pricing)</span></div>
+          <div class="table-scroll-wrap"><table>
             <thead>
               <tr>
                 <th>Model Endpoint</th>
@@ -576,7 +741,7 @@
               </tr>
             </thead>
             <tbody id="modelMatrixBody"></tbody>
-          </table>
+          </table></div>
         </div>
 
         <div class="panel">
@@ -701,15 +866,28 @@
       </div>
     </section>
 
-    <!-- TAB 5: CHANNEL SLIDERS & DIRECTOR MODE (#12 & #13) -->
+    <!-- TAB 5: PER-BOT CHANNEL SLIDERS & DIRECTOR MODE (#12 & #13) -->
     <section id="tab-tuning" class="tab-pane">
       <div class="grid-2">
         <div class="panel">
-          <div class="panel-title"><span>Per-Channel Parameters & Capability Toggles</span></div>
-          <div class="form-grid" style="margin-bottom:12px;">
+          <div class="panel-title">
+            <span>Per-Bot, Per-Channel Parameters & Capability Toggles</span>
+            <span id="activeTuneBotBadge" class="badge RUNNING">Target: All Bots</span>
+          </div>
+          <div style="margin-bottom:10px;">
+            <label class="kpi-label" style="margin-bottom:6px;">1. Select Which Bot to Configure (Or Broadcast to All Bots)</label>
+            <div id="tuneBotPillBar" class="bot-pill-bar"></div>
+          </div>
+          <div class="form-grid" style="margin-bottom:14px;">
+            <div>
+              <label class="kpi-label">2. Pick Known Server Channel</label>
+              <select id="tuneChannelPicker" onchange="onPickKnownChannel(this.value)">
+                <option value="">-- Select #channel --</option>
+              </select>
+            </div>
             <div>
               <label class="kpi-label">Discord Channel ID</label>
-              <input type="text" id="tuneChannelId" placeholder="Enter Channel ID (or select below)" />
+              <input type="text" id="tuneChannelId" placeholder="Or paste Channel ID" />
             </div>
             <div>
               <label class="kpi-label">Temperature (0.1 - 1.5)</label>
@@ -727,9 +905,9 @@
               <label class="kpi-label">Idle Post Interval (mins)</label>
               <input type="number" id="tuneRandom" step="5" min="0" value="0" />
             </div>
-            <div>
-              <button class="btn btn-primary" style="width:100%;padding:7px;" onclick="saveChannelTuning()">⚡ Apply to Channel</button>
-            </div>
+          </div>
+          <div style="margin-bottom:16px;">
+            <button class="btn btn-primary" style="width:100%;padding:10px;" onclick="saveChannelTuning()">⚡ Apply Parameters to Selected Bot &amp; Channel</button>
           </div>
           <div id="existingChannelsBox"></div>
         </div>
@@ -741,8 +919,13 @@
           </p>
           <div style="display:flex;flex-direction:column;gap:10px;">
             <div>
-              <label class="kpi-label">Target Channel ID (0 = Global Default)</label>
-              <input type="text" id="dirChannelId" value="0" />
+              <label class="kpi-label">Target Channel (Pick #channel or 0 = Global Default)</label>
+              <div style="display:flex;gap:8px;">
+                <select id="dirChannelPicker" style="flex:1;" onchange="if(this.value) document.getElementById('dirChannelId').value=this.value;">
+                  <option value="0">🌐 Global Default (0)</option>
+                </select>
+                <input type="text" id="dirChannelId" value="0" style="max-width:190px;" />
+              </div>
             </div>
             <div>
               <label class="kpi-label">Active Room Topic (3 - 8 words)</label>
@@ -1094,25 +1277,194 @@
       if (r) showToast(`✅ Memory ${op} complete`);
     }
 
+    let selectedTuningBot = '__ALL__';
+
+    function selectTuningBot(botName) {
+      selectedTuningBot = botName || '__ALL__';
+      const badge = document.getElementById('activeTuneBotBadge');
+      if (badge) {
+        badge.textContent = selectedTuningBot === '__ALL__' ? 'Target: All Bots' : `Target: ${selectedTuningBot}`;
+      }
+      renderChannelTuningPanel();
+      const curCh = document.getElementById('tuneChannelId')?.value?.trim();
+      if (curCh) loadChannelIntoSliders(curCh);
+    }
+
+    function getChannelLabel(cid) {
+      const dir = latestState.channel_directory || {};
+      const info = dir[String(cid)];
+      if (info && info.name && !info.name.startsWith('channel-')) {
+        return `#${info.name}` + (info.guild ? ` (${info.guild})` : '');
+      }
+      return `Channel #${String(cid).slice(-6)}`;
+    }
+
+    function getActiveBotChannelConfigMap() {
+      const perBot = latestState.per_bot_channel_configs || {};
+      if (selectedTuningBot !== '__ALL__' && perBot[selectedTuningBot]) {
+        return perBot[selectedTuningBot];
+      }
+      return latestState.channel_configs || {};
+    }
+
+    function onPickKnownChannel(chId) {
+      if (!chId) return;
+      document.getElementById('tuneChannelId').value = chId;
+      loadChannelIntoSliders(chId);
+    }
+
+    function loadChannelIntoSliders(chId) {
+      document.getElementById('tuneChannelId').value = String(chId);
+      const picker = document.getElementById('tuneChannelPicker');
+      if (picker) picker.value = String(chId);
+      const cfgMap = getActiveBotChannelConfigMap();
+      const c = cfgMap[String(chId)] || {};
+      document.getElementById('tuneTemp').value = c.temperature ?? 0.78;
+      document.getElementById('tuneResp').value = c.resp_chance ?? 0.05;
+      document.getElementById('tuneEmoji').value = c.emoji_chance ?? 0.45;
+      document.getElementById('tuneRandom').value = c.random_interval ?? 0;
+    }
+
     async function saveChannelTuning() {
       const chId = document.getElementById('tuneChannelId').value.trim();
-      if (!chId) return showToast('⚠️ Enter a Discord Channel ID first');
+      if (!chId) return showToast('⚠️ Pick a #channel or enter a Channel ID first');
       const updates = {
         temperature: parseFloat(document.getElementById('tuneTemp').value || '0.78'),
         resp_chance: parseFloat(document.getElementById('tuneResp').value || '0.05'),
         emoji_chance: parseFloat(document.getElementById('tuneEmoji').value || '0.45'),
         random_interval: parseFloat(document.getElementById('tuneRandom').value || '0')
       };
-      const r = await apiPost('/api/channel/config', { channel_id: chId, updates });
-      if (r) showToast(`✅ Updated channel ${chId} parameters`);
+      const botTarget = selectedTuningBot || '__ALL__';
+      const r = await apiPost('/api/channel/config', { bot: botTarget, channel_id: chId, updates });
+      if (r) showToast(`✅ Applied parameters to ${getChannelLabel(chId)} (${botTarget === '__ALL__' ? 'All Bots' : botTarget})`);
     }
 
-    async function toggleChannelFlag(chId, flagKey, curVal) {
+    async function toggleChannelFlag(chId, flagKey, curVal, explicitBot) {
+      const botTarget = explicitBot || selectedTuningBot || '__ALL__';
       const r = await apiPost('/api/channel/config', {
+        bot: botTarget,
         channel_id: String(chId),
         updates: { [flagKey]: !curVal }
       });
-      if (r) showToast(`⚙️ Channel ${chId}: ${flagKey} = ${!curVal}`);
+      if (r) showToast(`⚙️ ${botTarget === '__ALL__' ? 'All Bots' : botTarget} in ${getChannelLabel(chId)}: ${flagKey} = ${!curVal}`);
+    }
+
+    async function toggleHotReload() {
+      const r = await apiPost('/api/orchestrator/hot_reload', {});
+      if (r) showToast(`🔥 File-Watcher Hot-Reload is now ${r.hot_reload_enabled ? 'ENABLED' : 'DISABLED'}`);
+    }
+
+    async function shutdownOrchestrator() {
+      if (!confirm('🛑 Stop all Discord bots and shut down the background Orchestrator server?')) return;
+      await apiPost('/api/orchestrator/shutdown', {});
+      showToast('🛑 Orchestrator server shutting down...');
+    }
+
+    // Bot Studio ([E] & [C]) and .env Manager ([A] & [H]) Handlers
+    async function loadBotIntoStudio(botName) {
+      if (!botName) return;
+      const r = await apiPost('/api/bot/inspect', { bot: botName });
+      if (!r || !r.config) return;
+      const cfg = r.config;
+      document.getElementById('studioBotNameInput').value = cfg.name || botName;
+      document.getElementById('cfgKeywords').value = (cfg.keywords || []).join(', ');
+      document.getElementById('cfgTextModel').value = cfg.text_model || '';
+      document.getElementById('cfgVisionModel').value = cfg.vision_model || '';
+      document.getElementById('cfgImageModel').value = cfg.image_gen_model || '';
+      document.getElementById('cfgVoiceModel').value = cfg.voice_model || '';
+      document.getElementById('cfgTemp').value = cfg.temperature ?? 0.75;
+      document.getElementById('cfgTopP').value = cfg.top_p ?? 0.88;
+      document.getElementById('cfgRespChance').value = cfg.chance_to_respond ?? 0.01;
+      document.getElementById('cfgEmojiChance').value = cfg.random_emoji_chance ?? 0.35;
+      document.getElementById('cfgRandInt').value = cfg.default_random_interval ?? 0;
+      document.getElementById('cfgOutLen').value = cfg.output_length ?? 550;
+      document.getElementById('cfgEnVision').checked = !!cfg.enable_vision;
+      document.getElementById('cfgEnImage').checked = !!cfg.enable_image_gen;
+      document.getElementById('cfgEnGifs').checked = !!cfg.enable_gifs;
+      document.getElementById('cfgEnVoice').checked = !!cfg.enable_voice;
+      document.getElementById('studioCodeEditor').value = cfg.source_code || '';
+      showToast(`📂 Loaded '${botName}' into Bot Studio`);
+    }
+
+    async function saveVisualBotConfig(restartBot) {
+      const botName = document.getElementById('studioBotNameInput').value.trim() || document.getElementById('studioBotSelect').value;
+      if (!botName) return showToast('⚠️ Select a bot in Bot Studio first');
+      const kwStr = document.getElementById('cfgKeywords').value;
+      const updates = {
+        keywords: kwStr.split(',').map(s => s.trim()).filter(Boolean),
+        text_model: document.getElementById('cfgTextModel').value.trim(),
+        vision_model: document.getElementById('cfgVisionModel').value.trim(),
+        image_gen_model: document.getElementById('cfgImageModel').value.trim(),
+        voice_model: document.getElementById('cfgVoiceModel').value.trim(),
+        temperature: parseFloat(document.getElementById('cfgTemp').value || '0.75'),
+        top_p: parseFloat(document.getElementById('cfgTopP').value || '0.88'),
+        chance_to_respond: parseFloat(document.getElementById('cfgRespChance').value || '0.01'),
+        random_emoji_chance: parseFloat(document.getElementById('cfgEmojiChance').value || '0.35'),
+        default_random_interval: parseInt(document.getElementById('cfgRandInt').value || '0', 10),
+        output_length: parseInt(document.getElementById('cfgOutLen').value || '550', 10),
+        enable_vision: document.getElementById('cfgEnVision').checked,
+        enable_image_gen: document.getElementById('cfgEnImage').checked,
+        enable_gifs: document.getElementById('cfgEnGifs').checked,
+        enable_voice: document.getElementById('cfgEnVoice').checked
+      };
+      const r = await apiPost('/api/bot/update_config', { bot: botName, updates, restart: !!restartBot });
+      if (r) showToast(`✅ Applied config to '${botName}' (${restartBot ? 'restarted' : '0ms live hot-swap'})`);
+    }
+
+    async function saveBotStudioScript(restartBot) {
+      const botName = document.getElementById('studioBotNameInput').value.trim() || document.getElementById('studioBotSelect').value;
+      const srcCode = document.getElementById('studioCodeEditor').value;
+      if (!botName || !srcCode.trim()) return showToast('⚠️ Select a bot and ensure source code is non-empty');
+      const r = await apiPost('/api/bot/save_source', { bot: botName, source_code: srcCode, restart: !!restartBot });
+      if (r) showToast(`✅ AST-validated & saved '${botName}.py'`);
+    }
+
+    async function createNewBotWizard(startNow) {
+      const botName = document.getElementById('newBotName').value.trim();
+      const dTok = document.getElementById('newBotToken').value.trim();
+      const promptTxt = document.getElementById('newBotPrompt').value.trim();
+      if (!botName) return showToast('⚠️ Enter a Bot Name first');
+      const kwList = document.getElementById('newBotKeywords').value.split(',').map(s => s.trim()).filter(Boolean);
+      const payload = {
+        bot_name: botName,
+        discord_token: dTok,
+        system_prompt: promptTxt,
+        keywords: kwList,
+        text_model: document.getElementById('newBotTextModel').value.trim(),
+        temperature: parseFloat(document.getElementById('newBotTemp').value || '0.75'),
+        chance_to_respond: parseFloat(document.getElementById('newBotResp').value || '0.01'),
+        random_emoji_chance: parseFloat(document.getElementById('newBotEmoji').value || '0.35'),
+        default_random_interval: parseInt(document.getElementById('newBotIdle').value || '0', 10),
+        enable_vision: document.getElementById('newBotVision').checked,
+        enable_image_gen: document.getElementById('newBotImage').checked,
+        enable_gifs: document.getElementById('newBotGifs').checked,
+        enable_voice: document.getElementById('newBotVoice').checked,
+        start_now: !!startNow
+      };
+      const r = await apiPost('/api/bot/create', payload);
+      if (r) {
+        showToast(`🚀 Created bot '${r.bot}.py'!`);
+        document.getElementById('newBotName').value = '';
+        document.getElementById('newBotToken').value = '';
+      }
+    }
+
+    async function saveEnvKey() {
+      const k = document.getElementById('envKeyName').value.trim();
+      const v = document.getElementById('envKeyValue').value.trim();
+      if (!k || !v) return showToast('⚠️ Enter both key name and secret value');
+      const r = await apiPost('/api/env/set', { key: k, value: v });
+      if (r) {
+        document.getElementById('envKeyValue').value = '';
+        showToast(`🔑 Saved '${k}' to bot_info/.env`);
+      }
+    }
+
+    async function saveGlobalHistoryLength() {
+      const v = document.getElementById('envMaxHistory').value.trim();
+      if (!v) return;
+      const r = await apiPost('/api/env/set', { key: 'MAX_HISTORY_LENGTH', value: v });
+      if (r) showToast(`⚡ Updated MAX_HISTORY_LENGTH = ${v}`);
     }
 
     async function injectDirectorStage() {
@@ -1210,7 +1562,7 @@
       xrayBox.innerHTML = xlogs.length ? xlogs.map(x => `
         <div class="xray-card">
           <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-muted);">
-            <span><strong>${x.bot || 'Bot'}</strong> replying to <strong>${x.speaker || 'User'}</strong> (Ch: ${x.channel_id || 0})</span>
+            <span><strong>${x.bot || 'Bot'}</strong> replying to <strong>${x.speaker || 'User'}</strong> (${getChannelLabel(x.channel_id || 0)})</span>
             <span>Mood: <strong style="color:var(--emerald);">${x.mood || 'Steady'}</strong> • +${x.facts_learned || 0} facts</span>
           </div>
           ${x.thought ? `<div class="thought-bubble">💭 [THOUGHT]: "${x.thought}"</div>` : ''}
@@ -1229,7 +1581,7 @@
         const hook = rs.open_hook ? `${rs.open_hook.speaker}: "${rs.open_hook.hook}"` : 'None';
         return `
           <div style="background:#161f30;padding:10px;border-radius:6px;margin-bottom:8px;border:1px solid var(--border);">
-            <div><strong>Channel #${ck}</strong> — Pace: <code>${rs.conversational_pace || 'normal'}</code></div>
+            <div><strong>${getChannelLabel(ck)}</strong> <span class="channel-id-sub">${ck}</span> — Pace: <code>${rs.conversational_pace || 'normal'}</code></div>
             <div>• <strong>Active Topic:</strong> ${rs.active_topic || '—'} | <strong>Vibe:</strong> ${rs.room_vibe || '—'}</div>
             <div>• <strong>Room Props (5-Turn TTL):</strong> ${props}</div>
             <div>• <strong>Unfinished Hook:</strong> ${hook}</div>
@@ -1254,29 +1606,28 @@
       // 4. Memory CRUD Table
       renderMemoryTable();
 
-      // 5. Channel Configs
-      const chBox = document.getElementById('existingChannelsBox');
-      const chMap = latestState.channel_configs || {};
-      const chKeys = Object.keys(chMap).filter(k => !k.startsWith('guild_welcome_'));
-      chBox.innerHTML = chKeys.length ? chKeys.map(cid => {
-        const c = chMap[cid] || {};
-        return `
-          <div style="background:#161f30;padding:10px;border-radius:6px;margin-bottom:8px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-            <div>
-              <strong>Channel <code>${cid}</code></strong>
-              <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">
-                Temp=${c.temperature ?? 0.78} | Resp=${c.resp_chance ?? 0.05} | Emoji=${c.emoji_chance ?? 0.45} | Idle=${c.random_interval ?? 0}m
-              </span>
-            </div>
-            <div class="btn-row">
-              <button class="btn ${c.enabled !== false ? 'btn-success' : 'btn-danger'}" onclick="toggleChannelFlag('${cid}', 'enabled', ${c.enabled !== false})">Enabled: ${c.enabled !== false}</button>
-              <button class="btn" onclick="toggleChannelFlag('${cid}', 'react_only', ${!!c.react_only})">ReactOnly: ${!!c.react_only}</button>
-              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_image', ${c.enable_image !== false})">Image/Meme: ${c.enable_image !== false}</button>
-              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_voice', ${c.enable_voice !== false})">Voice: ${c.enable_voice !== false}</button>
-            </div>
-          </div>
-        `;
-      }).join('') : `<div style="color:var(--text-muted);">No per-channel overrides saved yet.</div>`;
+      // Hot-Reload button state
+      const hrBtn = document.getElementById('hotReloadBtn');
+      if (hrBtn) {
+        const hrOn = !!latestState.hot_reload_enabled;
+        hrBtn.textContent = hrOn ? '🔥 Hot-Reload: ON' : '🔥 Hot-Reload: OFF';
+        hrBtn.className = hrOn ? 'btn btn-success' : 'btn btn-ghost';
+      }
+
+      // Populate Bot Studio dropdown
+      const studioSel = document.getElementById('studioBotSelect');
+      if (studioSel) {
+        const prevVal = studioSel.value;
+        const botOpts = `<option value="">-- Select Bot to Edit --</option>` +
+          bots.map(b => `<option value="${b.name}">${b.name} (${b.script})</option>`).join('');
+        if (studioSel.innerHTML !== botOpts) {
+          studioSel.innerHTML = botOpts;
+          if (prevVal) studioSel.value = prevVal;
+        }
+      }
+
+      // 5. Per-Bot, Per-Channel Configurator
+      renderChannelTuningPanel();
 
       // 6. Render .env Keys & Global MAX_HISTORY_LENGTH
       const envSum = latestState.env_summary || {};
@@ -1300,6 +1651,107 @@
 
       // 7. Sync Social Graph Nodes & Edges
       syncSocialGraphData(latestState.social_graph || { nodes: [], edges: [] });
+    }
+
+    function renderChannelTuningPanel() {
+      const bots = latestState.bots || [];
+      const pillBar = document.getElementById('tuneBotPillBar');
+      if (pillBar) {
+        const allItems = [{ name: '__ALL__', label: '🌐 All Bots (Broadcast)' }].concat(
+          bots.map(b => ({ name: b.name, label: `🤖 ${b.name}` }))
+        );
+        pillBar.innerHTML = allItems.map(item => `
+          <button type="button" class="bot-pill-chip ${selectedTuningBot === item.name ? 'active' : ''}" onclick="selectTuningBot('${item.name}')">
+            ${item.label}
+          </button>
+        `).join('');
+      }
+
+      const dir = latestState.channel_directory || {};
+      const cfgMap = getActiveBotChannelConfigMap();
+      const allChIds = Array.from(new Set(
+        Object.keys(dir).concat(Object.keys(cfgMap)).filter(k => !k.startsWith('guild_welcome_') && k !== '0')
+      )).sort();
+
+      // Update channel dropdown pickers in Tuning & Director Mode
+      const tunePicker = document.getElementById('tuneChannelPicker');
+      if (tunePicker) {
+        const curPick = tunePicker.value;
+        const optsHtml = `<option value="">-- Select #channel (${allChIds.length} discovered) --</option>` +
+          allChIds.map(cid => {
+            const d = dir[cid] || {};
+            const topicHint = d.topic ? ` • ${d.topic}` : '';
+            return `<option value="${cid}">${getChannelLabel(cid)}${topicHint} [${cid}]</option>`;
+          }).join('');
+        if (tunePicker.innerHTML !== optsHtml) {
+          tunePicker.innerHTML = optsHtml;
+          if (curPick) tunePicker.value = curPick;
+        }
+      }
+
+      const dirPicker = document.getElementById('dirChannelPicker');
+      if (dirPicker) {
+        const curDir = dirPicker.value;
+        const dirHtml = `<option value="0">🌐 Global Default (0)</option>` +
+          allChIds.map(cid => `<option value="${cid}">${getChannelLabel(cid)} [${cid}]</option>`).join('');
+        if (dirPicker.innerHTML !== dirHtml) {
+          dirPicker.innerHTML = dirHtml;
+          if (curDir) dirPicker.value = curDir;
+        }
+      }
+
+      const chBox = document.getElementById('existingChannelsBox');
+      if (!chBox) return;
+      const perBotAll = latestState.per_bot_channel_configs || {};
+
+      chBox.innerHTML = allChIds.length ? allChIds.map(cid => {
+        const c = cfgMap[cid] || {};
+        const d = dir[cid] || {};
+        const chLabel = getChannelLabel(cid);
+        const topicBadge = d.topic ? `<span class="badge BACKOFF" style="font-size:10.5px;">Topic: ${d.topic}</span>` : '';
+        const targetLabel = selectedTuningBot === '__ALL__' ? 'All Bots' : selectedTuningBot;
+
+        // When viewing __ALL__, show a quick per-bot status strip so you can see which bots are enabled/disabled in this channel!
+        let perBotStrip = '';
+        if (selectedTuningBot === '__ALL__' && bots.length > 0) {
+          perBotStrip = `<div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px;">` +
+            bots.map(b => {
+              const bc = (perBotAll[b.name] || {})[cid] || {};
+              const bEn = bc.enabled !== false;
+              const bRo = !!bc.react_only;
+              const col = !bEn ? 'var(--crimson)' : (bRo ? 'var(--amber)' : 'var(--emerald)');
+              const stTxt = !bEn ? 'Disabled' : (bRo ? 'ReactOnly' : 'Active');
+              return `<span style="background:var(--bg-input);border:1px solid var(--border);padding:2px 8px;border-radius:4px;cursor:pointer;" onclick="selectTuningBot('${b.name}')" title="Click to configure ${b.name} in ${chLabel}">🤖 <strong>${b.name}:</strong> <span style="color:${col};font-weight:700;">${stTxt}</span> (T=${bc.temperature ?? 0.78})</span>`;
+            }).join('') + `</div>`;
+        }
+
+        return `
+          <div class="channel-card">
+            <div class="channel-card-top">
+              <div>
+                <div class="channel-name-badge">
+                  <span>💬 ${chLabel}</span>
+                  <span class="channel-id-sub">ID: ${cid}</span>
+                  ${topicBadge}
+                </div>
+                <div style="color:var(--text-muted);font-size:12px;margin-top:4px;">
+                  <strong>[${targetLabel}]</strong> Temp=<code>${c.temperature ?? 0.78}</code> | Chime=<code>${c.resp_chance ?? 0.05}</code> | Emoji=<code>${c.emoji_chance ?? 0.45}</code> | Idle=<code>${c.random_interval ?? 0}m</code>
+                </div>
+              </div>
+              <button class="btn btn-ghost" onclick="loadChannelIntoSliders('${cid}')">🎯 Load into Sliders</button>
+            </div>
+            ${perBotStrip}
+            <div class="btn-row">
+              <button class="btn ${c.enabled !== false ? 'btn-success' : 'btn-danger'}" onclick="toggleChannelFlag('${cid}', 'enabled', ${c.enabled !== false})">${c.enabled !== false ? '🟢 Enabled' : '🔇 Disabled'}</button>
+              <button class="btn ${c.react_only ? 'btn-primary' : ''}" onclick="toggleChannelFlag('${cid}', 'react_only', ${!!c.react_only})">🤐 ReactOnly: ${!!c.react_only}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_image', ${c.enable_image !== false})">🎨 Image/Meme: ${c.enable_image !== false}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_voice', ${c.enable_voice !== false})">🔊 Voice: ${c.enable_voice !== false}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_vision', ${c.enable_vision !== false})">👁️ Vision: ${c.enable_vision !== false}</button>
+              <button class="btn" onclick="toggleChannelFlag('${cid}', 'enable_gifs', ${c.enable_gifs !== false})">🎞️ GIFs: ${c.enable_gifs !== false}</button>
+            </div>
+          </div>
+        `;
+      }).join('') : `<div style="color:var(--text-muted);">No channels discovered yet. Start a bot or paste a Discord Channel ID above.</div>`;
     }
 
     function renderMemoryTable() {
@@ -1502,6 +1954,30 @@
         draggedNode.y = (e.clientY - rect.top) * (canvas.height / rect.height);
       });
       window.addEventListener('mouseup', () => { draggedNode = null; });
+      // Mobile touch support for dragging nodes on phones/tablets
+      canvas.addEventListener('touchstart', e => {
+        if (!e.touches.length) return;
+        const t = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        const mx = (t.clientX - rect.left) * (canvas.width / rect.width);
+        const my = (t.clientY - rect.top) * (canvas.height / rect.height);
+        for (const n of graphNodes.values()) {
+          if (Math.hypot(n.x - mx, n.y - my) <= 28) {
+            draggedNode = n;
+            e.preventDefault();
+            break;
+          }
+        }
+      }, { passive: false });
+      canvas.addEventListener('touchmove', e => {
+        if (!draggedNode || !e.touches.length) return;
+        const t = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        draggedNode.x = (t.clientX - rect.left) * (canvas.width / rect.width);
+        draggedNode.y = (t.clientY - rect.top) * (canvas.height / rect.height);
+        e.preventDefault();
+      }, { passive: false });
+      window.addEventListener('touchend', () => { draggedNode = null; });
     })();
 
     let activeEventSource = null;

@@ -14,7 +14,13 @@ from config import (
     THIRD_PARTY_REPORT_REGEX,
     LOW_INFORMATION_RETRIEVAL_WORDS,
 )
-from core_system import post_with_backoff, update_json_file, load_json_file
+from core_system import (
+    post_with_backoff,
+    update_json_file,
+    load_json_file,
+    is_model_circuit_open,
+    rank_models_by_ewma_latency,
+)
 
 # ==============================================================================
 # PHASE 1 CONSTANTS & SAFE CONFIG FALLBACKS
@@ -23,7 +29,7 @@ REUNION_ABSENCE_SECONDS = getattr(config, "REUNION_ABSENCE_SECONDS", 172800.0)  
 REUNION_COOLDOWN_SECONDS = 21600.0  # 6 hours cooldown after a reunion trigger
 EPISODIC_MIN_SESSION_MSGS = getattr(config, "EPISODIC_MIN_SESSION_MSGS", 18)
 MAX_EPISODIC_CHAPTERS = getattr(config, "MAX_EPISODIC_CHAPTERS", 12)
-DEFAULT_SUBCONSCIOUS_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+DEFAULT_SUBCONSCIOUS_MODEL = "Qwen/Qwen3-30B-A3B"
 
 ALPHANUM_TOKEN_REGEX = re.compile(r"[a-z0-9]+")
 
@@ -1031,6 +1037,30 @@ def get_and_tick_bot_internal_state(
     return state_holder["state"]
 
 
+def synthesize_fallback_inner_thought(bot_reply_text: str, speaker_name: str = "", mood: str = "") -> str:
+    """
+    Synthesizes a concise in-character inner thought when neither Phase A `[THOUGHT:]`
+    nor Phase B `bot_state.inner_thought` was emitted, ensuring the Web-UI Subconscious
+    X-Ray stream never displays blank thought cards.
+    """
+    if not bot_reply_text:
+        return f"Keeping an eye on {speaker_name or 'the room'}."
+    # Check if the reply has an asterisk stage direction we can turn into subtext
+    emote_m = re.search(r"\*([^*\n]{3,65})\*", bot_reply_text)
+    cleaned_spoken = re.sub(r"\*[^*]+\*", " ", bot_reply_text)
+    cleaned_spoken = re.sub(r"\s+", " ", cleaned_spoken).strip()
+    first_sent = re.split(r"(?<=[.!?~])\s+", cleaned_spoken)[0].strip() if cleaned_spoken else ""
+    if emote_m and first_sent:
+        cand = f"({emote_m.group(1).strip()}) {first_sent}"
+    elif first_sent:
+        cand = first_sent
+    elif emote_m:
+        cand = f"*{emote_m.group(1).strip()}* toward {speaker_name or 'the chat'}."
+    else:
+        cand = bot_reply_text.strip()
+    return cand[:155].rstrip() + ("..." if len(cand) > 155 else "")
+
+
 def save_bot_thought_subtext(
     shared_cache_file: str,
     channel_id: int,
@@ -1296,16 +1326,21 @@ async def run_subconscious_cognitive_turn(
         leader_holder["is_leader"] = True
 
     if not leader_holder["is_leader"] or not api_key or not api_url:
+        if shared_cache_file and not bot_thought_text and bot_reply_text:
+            fb_t = synthesize_fallback_inner_thought(bot_reply_text, speaker_name=speaker_name)
+            save_bot_thought_subtext(shared_cache_file, channel_id, my_bot_name, fb_t, speaker_name=speaker_name)
         return {"status": "non_leader_skipped", "bot": my_bot_name}
 
-    model_to_use = subconscious_model or (
-        getattr(config, "FALLBACK_TEXT_MODELS", [DEFAULT_SUBCONSCIOUS_MODEL])[0]
-        if getattr(config, "FALLBACK_TEXT_MODELS", None)
-        else DEFAULT_SUBCONSCIOUS_MODEL
-    )
+    endpoint_label = api_url.rsplit("/", 1)[-1] if api_url else "completions"
+    candidate_models = list(getattr(config, "FALLBACK_TEXT_MODELS", [DEFAULT_SUBCONSCIOUS_MODEL]) or [DEFAULT_SUBCONSCIOUS_MODEL])
+    if subconscious_model and subconscious_model not in candidate_models:
+        candidate_models.insert(0, subconscious_model)
+    ranked_sub_models = rank_models_by_ewma_latency(candidate_models, endpoint_label)
+    model_to_use = ranked_sub_models[0] if ranked_sub_models else DEFAULT_SUBCONSCIOUS_MODEL
 
     # Build compact recent transcript (last 8 messages) + velocity metrics
     recent_lines = []
+    human_authored_text_by_user: dict[str, list[str]] = {}
     recent_ts = []
     recent_users_set: set[str] = {speaker_name} if speaker_name else set()
     for m in (raw_history or [])[-8:]:
@@ -1316,12 +1351,16 @@ async def run_subconscious_cognitive_turn(
         c_txt = str(m.get("content", "") or "").strip()
         if c_txt:
             recent_lines.append(f"[{a_name}]: {c_txt[:220]}")
+            if not m.get("author_is_bot") and m.get("role") != "assistant":
+                human_authored_text_by_user.setdefault(a_name.lower(), []).append(c_txt)
         if isinstance(m.get("timestamp"), (int, float)):
             recent_ts.append(float(m["timestamp"]))
 
+    if speaker_name and user_message and not is_speaker_bot:
+        human_authored_text_by_user.setdefault(speaker_name.lower(), []).append(user_message)
+
     exchange_summary = "\n".join(recent_lines[-6:])
-    if bot_reply_text and my_bot_name:
-        exchange_summary += f"\n[{my_bot_name} (Just Replied)]: {bot_reply_text[:240]}"
+    bot_reply_context = f"\n\nBot's Latest Reply (For Mood & Subtext ONLY — NEVER extract user_facts from claims made by the bot!):\n[{my_bot_name}]: {bot_reply_text[:240]}" if (bot_reply_text and my_bot_name) else ""
 
     msg_velocity_desc = "steady chat"
     if len(recent_ts) >= 3:
@@ -1342,11 +1381,11 @@ async def run_subconscious_cognitive_turn(
         f"Active Responder Bot: {my_bot_name}\n"
         f"Current Speaker: {speaker_name} ({'Fellow Bot' if is_speaker_bot else 'Human Member'})\n"
         f"Message Velocity: {msg_velocity_desc}\n\n"
-        f"Recent Exchange:\n{exchange_summary}\n\n"
+        f"Recent Exchange:\n{exchange_summary}{bot_reply_context}\n\n"
         "Analyze this exchange and return ONLY a single valid JSON object with these keys:\n"
         "{\n"
         '  "user_facts": [\n'
-        '    {"user": "ExactSpeakerName", "fact": "Enduring personal fact or boundary (NO last names, addresses, emails, phones, cards, or ephemeral chat actions)", "salience": 75, "category": "CORE|BOUNDARY|PROJECT|PREF|REL|HABIT|OPINION|SITUATIONAL", "action": "ADD|SUPERSEDE"}\n'
+        '    {"user": "ExactSpeakerName", "fact": "Enduring personal fact or boundary explicitly stated BY that user (NO last names, addresses, emails, phones, cards, or bot-invented claims)", "salience": 75, "category": "CORE|BOUNDARY|PROJECT|PREF|REL|HABIT|OPINION|SITUATIONAL", "action": "ADD|SUPERSEDE"}\n'
         "  ],\n"
         '  "server_lore": [{"fact": "Enduring server event/running lore", "salience": 65}],\n'
         '  "general_facts": [{"fact": "Universal trivia/technical fact", "salience": 60}],\n'
@@ -1365,6 +1404,7 @@ async def run_subconscious_cognitive_turn(
         "  },\n"
         '  "bot_state": {\n'
         f'    "mood": "2-4 word carryover mood for {my_bot_name}",\n'
+        f'    "inner_thought": "1 concise in-character inner monologue sentence (<130 chars) from {my_bot_name}s perspective reacting to {speaker_name}",\n'
         f'    "arc_note": "Optional temporary character callback (<70 chars) or empty string"\n'
         "  }"
         + (
@@ -1373,34 +1413,44 @@ async def run_subconscious_cognitive_turn(
             else "\n"
         )
         + "}\n"
-        "STRICT PRIVACY & QUALITY RULES:\n"
+        "STRICT PRIVACY & ATTRIBUTION RULES:\n"
         "1. NEVER extract last names/surnames, street addresses, emails, phone numbers, credit cards, or passwords (first names are fine).\n"
-        "2. Only include `user_facts` if a speaker stated/confirmed a real trait, boundary, project, preference, or milestone. Leave `user_facts: []` if none!\n"
-        "3. `salience` is 1-100: CORE/BOUNDARY=90-100, PROJECT/PREF/REL=70-89, HABIT/OPINION/LORE=40-69, SITUATIONAL=10-39."
+        "2. Only include `user_facts` if the target human user DIRECTLY stated or confirmed that fact in their own message. NEVER extract `user_facts` from claims or nicknames invented by a bot in `Bot's Latest Reply`!\n"
+        "3. Always populate `bot_state.inner_thought` with a vivid 1-sentence in-character inner thought from the responder bot's point of view.\n"
+        "4. `salience` is 1-100: CORE/BOUNDARY=90-100, PROJECT/PREF/REL=70-89, HABIT/OPINION/LORE=40-69, SITUATIONAL=10-39."
     )
 
-    payload = {
-        "model": model_to_use,
-        "messages": [
-            {"role": "system", "content": "Output ONLY a single valid JSON object. Do NOT output <think> tags or markdown prose."},
-            {"role": "user", "content": sub_prompt},
-        ],
-        "temperature": 0.15,
-        "max_tokens": 800,
-    }
-
-    res = await post_with_backoff(
-        api_url,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json_payload=payload,
-        timeout=(8, 20),
-        max_retries=1,
-        bot_name=f"{my_bot_name}:Subconscious",
-    )
+    res = None
+    for cand_m in ranked_sub_models[:2]:
+        if is_model_circuit_open(f"{endpoint_label}:{cand_m}") and len(ranked_sub_models) > 1:
+            continue
+        model_to_use = cand_m
+        payload = {
+            "model": model_to_use,
+            "messages": [
+                {"role": "system", "content": "Output ONLY a single valid JSON object. Do NOT output <think> tags or markdown prose."},
+                {"role": "user", "content": sub_prompt},
+            ],
+            "temperature": 0.15,
+            "max_tokens": 650,
+        }
+        res = await post_with_backoff(
+            api_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json_payload=payload,
+            timeout=(6, 14),
+            max_retries=1,
+            bot_name=f"{my_bot_name}:Subconscious",
+        )
+        if res is not None and res.status_code == 200:
+            break
 
     if not res or res.status_code != 200:
         st_code = getattr(res, "status_code", "TIMEOUT")
         print(f"[{my_bot_name}] [SUBCONSCIOUS API WARN] Model '{model_to_use}' returned {st_code}")
+        if shared_cache_file and not bot_thought_text and bot_reply_text:
+            fb_t = synthesize_fallback_inner_thought(bot_reply_text, speaker_name=speaker_name)
+            save_bot_thought_subtext(shared_cache_file, channel_id, my_bot_name, fb_t, speaker_name=speaker_name)
         return {"status": "api_skipped", "bot": my_bot_name}
 
     try:
@@ -1439,6 +1489,15 @@ async def run_subconscious_cognitive_turn(
                 if not canon_u or canon_u.lower() == my_bot_name.lower():
                     continue
                 if is_misattributed_hearsay(f_raw, canon_u, speaker_name, user_message):
+                    continue
+                # Verify human-authored grounding: never learn a fact about a human solely from a bot's reply!
+                u_authored_blobs = human_authored_text_by_user.get(canon_u.lower()) or human_authored_text_by_user.get(u_raw.lower()) or []
+                if not is_speaker_bot and canon_u.lower() == speaker_name.lower() and user_message:
+                    u_authored_blobs = list(u_authored_blobs) + [user_message]
+                u_authored_tokens = set(_tokenize_bm25(" ".join(u_authored_blobs)))
+                f_tokens = set(_tokenize_bm25(f_raw))
+                if not f_tokens or not u_authored_tokens or len(f_tokens & u_authored_tokens) == 0:
+                    print(f"[{my_bot_name}] [SUBCONSCIOUS FILTER] Blocked ungrounded/bot-induced fact for {canon_u}: '{f_raw}'")
                     continue
                 safe_f = sanitize_or_reject_sensitive_pii(f_raw)
                 if not safe_f:
@@ -1567,9 +1626,14 @@ async def run_subconscious_cognitive_turn(
                     }
                 room_map[ch_key] = cur_room
 
-            # Bot Internal State (TTL Mood & Rotating Character Arc Note)
-            b_in = parsed.get("bot_state")
-            if isinstance(b_in, dict) and my_bot_name:
+            # Bot Internal State (TTL Mood, Inner Thought & Rotating Character Arc Note)
+            b_in = parsed.get("bot_state") if isinstance(parsed.get("bot_state"), dict) else {}
+            effective_thought = (
+                (bot_thought_text or "").strip()
+                or str(b_in.get("inner_thought", "") or "").strip()
+                or synthesize_fallback_inner_thought(bot_reply_text, speaker_name=speaker_name)
+            )[:180]
+            if my_bot_name:
                 all_b = cache.setdefault("_bot_internal_state", {})
                 ch_b = all_b.setdefault(ch_key, {})
                 b_st = ch_b.setdefault(my_bot_name.strip(), {})
@@ -1577,6 +1641,9 @@ async def run_subconscious_cognitive_turn(
                 if mood_val:
                     b_st["mood"] = mood_val[:60]
                     b_st["mood_ttl"] = 3
+                if effective_thought:
+                    b_st["inner_thought"] = effective_thought
+                    b_st["thought_ttl"] = 2
                 arc_val = str(b_in.get("arc_note", "") or "").strip()
                 if arc_val:
                     arcs = b_st.get("arc_notes", [])
@@ -1615,10 +1682,10 @@ async def run_subconscious_cognitive_turn(
                 "channel_id": int(channel_id or 0),
                 "bot": my_bot_name,
                 "speaker": speaker_name,
-                "thought": (bot_thought_text or "")[:180],
-                "mood": str((parsed.get("bot_state") or {}).get("mood", ""))[:50],
-                "active_topic": str((parsed.get("room_state") or {}).get("active_topic", ""))[:70],
-                "room_vibe": str((parsed.get("room_state") or {}).get("room_vibe", ""))[:40],
+                "thought": effective_thought,
+                "mood": str(b_in.get("mood", "") or "Engaged")[:50],
+                "active_topic": str((parsed.get("room_state") or {}).get("active_topic", "") or "Live conversation")[:70],
+                "room_vibe": str((parsed.get("room_state") or {}).get("room_vibe", "") or "Active")[:40],
                 "facts_learned": len(raw_u_facts) + len(raw_srv) + len(raw_gen),
             }
             if xray_log and isinstance(xray_log[-1], dict) and xray_log[-1].get("bot") == my_bot_name and (now_val - float(xray_log[-1].get("ts", 0))) < 15.0:

@@ -15,7 +15,7 @@ from config import (
     SITUATIONAL_CELEBRATION_REGEX, SITUATIONAL_HELP_SEEKING_REGEX,
     SITUATIONAL_SHARED_BOND_REGEX, AFFECTION_GIFT_OR_CARE_REGEX,
     PLAYFUL_BANTER_OR_RIVALRY_REGEX, RELATIONSHIP_QUERY_REGEX,
-    THIRD_PARTY_DEFENSE_OR_PRAISE_REGEX
+    THIRD_PARTY_DEFENSE_OR_PRAISE_REGEX, REACTION_FOOTER_STRIP_REGEX
 )
 from core_system import post_with_backoff, update_json_file
 from text_and_parsers import extract_used_emotes, parse_meme_gen_tag
@@ -90,15 +90,24 @@ _METADATA_LINE_PREFIXES = (
     "[contains gif of:",
     "[contains youtube video:",
     "[linked webpage:",
+    "[reactions on this message:",
     "[system "
 )
 INDIRECT_HEARSAY_CHAIN_REGEX = re.compile(
     r'\bi\s+(?:said|told\s+\w+)\s+(?:that\s+)?(?:they|he|she|someone)\s+(?:said|told|claimed|thinks|thought)\b',
     re.IGNORECASE
 )
-SYSTEM_NOTE_INLINE_REGEX = re.compile(r'\*\(System Note:.*?\)\*', re.IGNORECASE)
+DISPUTED_OR_QUESTIONED_PREMISE_REGEX = re.compile(
+    r"\b(?:"
+    r"who\s+told\s+you|did\s+\w+\s+tell\s+you|why\s+(?:did|do|are)\s+you\s+call(?:ing)?\s+me|"
+    r"when\s+did\s+i\s+(?:say|tell|ask)|i\s+don['’]?t\s+remember\s+telling\s+you|"
+    r"i\s+never\s+(?:said|told\s+you|asked\s+you)"
+    r")\b",
+    re.IGNORECASE
+)
+SYSTEM_NOTE_INLINE_REGEX = re.compile(r'\*?\s*\(System Note:[^\n]*?\)\s*\*?', re.IGNORECASE)
 LEARNED_INLINE_REGEX = re.compile(
-    r'\*\([^)]*learned (?:server fact|general fact|about).*?\)\*',
+    r'\*?\s*\([^\n]*?\blearned (?:server fact|general fact|about)\b[^\n]*\)\s*\*?',
     re.IGNORECASE
 )
 OTHER_BOT_ATTACHED_IMG_NOTE_REGEX = re.compile(
@@ -1828,6 +1837,19 @@ def is_misattributed_hearsay(fact: str, target_user: str, speaker_name: str, use
 
     msg_clean = _strip_metadata_and_speaker_headers(user_message)
 
+    # Block if the user is questioning or disputing why the bot said/called them something
+    if DISPUTED_OR_QUESTIONED_PREMISE_REGEX.search(msg_clean):
+        return True
+
+    # If the candidate fact claims a positive nickname preference ("prefers to be called X"),
+    # verify the user actually requested or permitted it rather than asking why the bot used it
+    if re.search(r"\b(?:prefers?\s+to\s+be\s+called|likes?\s+being\s+called|nickname\s+is)\b", fact, re.IGNORECASE):
+        if not (
+            _IMPLICIT_CALL_ME_PREF_REGEX.search(msg_clean)
+            or re.search(r"\b(?:it['’]?s\s+ok(?:ay)?\s+to\s+call\s+me|you\s+can\s+call\s+me|fine\s+to\s+call\s+me)\b", msg_clean, re.IGNORECASE)
+        ):
+            return True
+
     # If the candidate fact is attributed to the current speaker without an explicit first-person
     # pronoun (e.g., subject-drop like "Turned off vsync and crashed" or "Playing WoW Forever tonight"),
     # only block it if the message is a pure question directed at the bot with no self-statement!
@@ -1944,24 +1966,27 @@ async def verify_and_resolve_user_facts(
     has_third_party = bool(THIRD_PARTY_REPORT_REGEX.search(msg_clean_for_fp))
     prompt_tokens = normalize_tokens(msg_clean_for_fp)
 
-    # Include tokens from the last 2 messages in raw_history so facts about a bot or user
-    # mentioned in the immediate exchange can also fast-verify in 0ms!
-    recent_hist_text = " ".join(
-        str(m.get("content", "")) for m in (raw_history or [])[-2:]
-        if isinstance(m, dict) and m.get("role") != "system"
+    # Include tokens from the last 2 HUMAN-authored messages in raw_history (excluding bot replies
+    # so a bot can never fast-verify a hallucinated claim about a human from its own assistant turn!)
+    recent_human_hist_text = " ".join(
+        _strip_metadata_and_speaker_headers(str(m.get("content", "")))
+        for m in (raw_history or [])[-3:]
+        if isinstance(m, dict) and m.get("role") == "user" and not m.get("author_is_bot")
     )
     combined_verify_tokens = _expand_tokens_with_synonyms(
-        prompt_tokens | normalize_tokens(recent_hist_text)
+        prompt_tokens | normalize_tokens(recent_human_hist_text)
     )
-    if not has_third_party and combined_verify_tokens:
+    if not has_third_party and not DISPUTED_OR_QUESTIONED_PREMISE_REGEX.search(msg_clean_for_fp) and combined_verify_tokens:
         fast_verified: list[tuple[str, str]] = []
         needs_llm_check = False
         for canon_u, c_fact in pre_filtered:
             u_base = _extract_base_username(canon_u)
-            is_about_speaker = (u_base == speaker_base)
+            is_about_speaker = (u_base == speaker_base and has_first_person)
+            is_target_fellow_bot = any(_extract_base_username(str(ob)) == u_base for ob in (other_bot_names or set()))
             is_explicitly_named = (
                 len(u_base) >= 3
-                and (u_base in msg_clean_for_fp.lower() or u_base in recent_hist_text.lower())
+                and is_target_fellow_bot
+                and (u_base in msg_clean_for_fp.lower() or u_base in recent_human_hist_text.lower())
             )
             if not (is_about_speaker or is_explicitly_named):
                 needs_llm_check = True
@@ -2269,6 +2294,7 @@ def build_api_messages_from_history(
                         recent_meme_captions.append(cap.upper())
 
             own_text = ERROR_REPLY_STRIP_REGEX.sub('', own_text).strip()
+            own_text = REACTION_FOOTER_STRIP_REGEX.sub('', own_text).strip()
             own_text = SYSTEM_NOTE_INLINE_REGEX.sub('', own_text).strip()
             own_text = LEARNED_INLINE_REGEX.sub('', own_text).strip()
             own_text = IMAGE_DESC_STRIP_REGEX.sub('', own_text).strip()
@@ -2302,9 +2328,10 @@ def build_api_messages_from_history(
             # Do NOT re-inject `[IMAGE_GEN: ...]` or `[MEME_GEN: ...]` tags into past assistant
             # turns in history—leaving old media tags in assistant turns causes the LLM to
             # spam unsolicited memes on every turn and fixate on the old visual prompt!
+            # Keep role='assistant' turns 100% pure spoken text (no [Reactions on this message: ...] footer)
+            # so the LLM never mimics reaction metadata tags at the end of its own replies!
             if own_text:
-                react_footer = format_message_reactions_footer(msg.get("reactions"))
-                api_messages.append({"role": "assistant", "content": f"{own_text}{react_footer}"})
+                api_messages.append({"role": "assistant", "content": own_text})
             if glitch_summary and idx >= len(raw_history) - 10:
                 api_messages.append({
                     "role": "system",
@@ -2322,6 +2349,7 @@ def build_api_messages_from_history(
             addressed_bot = msg.get("addressed_bot")
             glitch_summary = extract_glitch_summary(other_text)
             other_text = ERROR_REPLY_STRIP_REGEX.sub('', other_text).strip()
+            other_text = REACTION_FOOTER_STRIP_REGEX.sub('', other_text).strip()
             other_text = OTHER_BOT_ATTACHED_IMG_NOTE_REGEX.sub(
                 r'[\1 attached a generated image]',
                 other_text
@@ -2439,9 +2467,12 @@ def build_api_messages_from_history(
     micro_impulse = random.choice(SPONTANEOUS_MICRO_MOMENTS)
     variety_rules.append(f"- **SPONTANEOUS CONVERSATIONAL IMPULSE**: {micro_impulse}")
     variety_rules.append(
-        f"- **SINGLE-TURN DISCORD CHAT FORMAT (CRITICAL)**: Output ONLY your own single response as {bot_display_name}. "
-        "Do NOT wrap your spoken sentences in quotation marks (`\"...\"`), NEVER echo the user's message at the start, "
-        "NEVER output two separate turns on two lines, and NEVER write meta-stage notes like '[No response—...]'!"
+        f"- **SINGLE-TURN DISCORD CHAT FORMAT & ANTI-ECHO (CRITICAL)**: Output ONLY your own single response as {bot_display_name}. "
+        "Do NOT wrap your spoken sentences in quotation marks (`\"...\"`), NEVER repeat or echo a user's message verbatim, "
+        "NEVER output `[Reactions on this message: ...]` or `*(System: ...)*` metadata tags, and NEVER write meta-stage notes like '[No response—...]'!"
+    )
+    variety_rules.append(
+        f"- **SPEAKER OWNERSHIP BOUNDARY (DO NOT ABSORB USER LIFE EVENTS)**: When human members talk about their own real-life plans, moving houses/apartments, jobs, hardware, or family, remember those events belong to THAT human speaker—NOT to you ({bot_display_name})! Never say 'my new place' or generate images of yourself moving boxes when a human user is the one moving."
     )
 
     # Upgrade #6 — Kolmogorov Complexity (zlib NCD < 0.42) Structural Anti-Loop Detector
@@ -2482,6 +2513,7 @@ def upsert_chat_memory_entry(chat_memory_file: str, channel_id: int, entry: dict
             if isinstance(c_val, str) and existing_item.get("role") != "system":
                 glitch_sum = extract_glitch_summary(c_val)
                 cleaned_c = ERROR_REPLY_STRIP_REGEX.sub('', c_val).strip()
+                cleaned_c = REACTION_FOOTER_STRIP_REGEX.sub('', cleaned_c).strip()
                 if not cleaned_c or EMPTY_SPEAKER_TAG_REGEX.fullmatch(cleaned_c):
                     if glitch_sum:
                         a_name = existing_item.get("author_name", "A bot")

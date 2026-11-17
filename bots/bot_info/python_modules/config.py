@@ -280,13 +280,19 @@ INTENTIONAL_NO_RESPONSE_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Strips any saved or echoed API/System error notices
+# Strips any saved or echoed API/System error notices (including single-asterisk, spaced, or bare parenthetical variants)
 ERROR_REPLY_STRIP_REGEX = re.compile(
-    r'\*\((?:API Error [^\)]+|System:[^\)]+|Brain empty[^\)]*|(?:Image|Meme|Voice) generation [^\)]+)\)\*',
+    r'\*?\s*\((?:API Error [^\)]+|System:\s*[^\)]+|Brain empty[^\)]*|(?:Image|Meme|Voice) generation [^\)]+)\)\s*\*?',
     re.IGNORECASE
 )
 ERROR_REPLY_CAPTURE_REGEX = re.compile(
-    r'\*\(((?:API Error [^\)]+|System:[^\)]+|Brain empty[^\)]*|(?:Image|Meme|Voice) generation [^\)]+))\)\*',
+    r'\*?\s*\(((?:API Error [^\)]+|System:\s*[^\)]+|Brain empty[^\)]*|(?:Image|Meme|Voice) generation [^\)]+))\)\s*\*?',
+    re.IGNORECASE
+)
+
+# Strips leaked [Reactions on this message: ...] footers if an LLM ever mimics them in chat
+REACTION_FOOTER_STRIP_REGEX = re.compile(
+    r'\s*\[Reactions on this message:[^\]\n]*\]?',
     re.IGNORECASE
 )
 
@@ -511,6 +517,7 @@ FALLBACK_VISION_MODELS = [
 ]
 
 FALLBACK_TEXT_MODELS = [
-    "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "Qwen/Qwen3-30B-A3B"
+    "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 ]

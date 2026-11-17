@@ -24,7 +24,8 @@ from config import (
     FALLBACK_IMAGE_NOTE_REGEX, FALLBACK_VISION_MODELS, FALLBACK_TEXT_MODELS,
     TOPIC_CHANGE_REQUEST_REGEX, BARE_FILLER_UTTERANCE_REGEX,
     INTENTIONAL_NO_RESPONSE_REGEX, PERSONAL_FACT_STATEMENT_REGEX,
-    IMAGE_REMIX_REQ_REGEX, IMAGE_DESC_EXTRACT_REGEX
+    IMAGE_REMIX_REQ_REGEX, IMAGE_DESC_EXTRACT_REGEX,
+    REACTION_FOOTER_STRIP_REGEX
 )
 
 from core_system import (
@@ -304,7 +305,7 @@ def run_bot(
     extracted_voice_style = default_voice_style
 
     def record_ipc_heartbeat():
-        """Writes live process telemetry, PID, WebSocket latency, and EWMA model stats for orchestrator.py."""
+        """Writes live process telemetry, PID, WebSocket latency, channel names, and per-bot config paths for orchestrator.py & /hub."""
         if not client.user:
             return
         ws_ms = round(float(getattr(client, "latency", 0.0) or 0.0) * 1000.0, 1)
@@ -312,6 +313,22 @@ def run_bot(
         b_name = client.user.display_name
         now_h = time.time()
         model_tel = get_all_model_telemetry()
+
+        ch_meta_snapshot = {}
+        try:
+            for g in list(getattr(client, "guilds", []) or []):
+                g_name = getattr(g, "name", "Server")
+                for ch in list(getattr(g, "text_channels", []) or []):
+                    ch_meta_snapshot[str(ch.id)] = {
+                        "name": getattr(ch, "name", str(ch.id)),
+                        "guild": g_name,
+                    }
+        except Exception:
+            pass
+
+        abs_ch_cfg = os.path.abspath(channel_config_file)
+        abs_uprof = os.path.abspath(user_profiles_file)
+        abs_ltm = os.path.abspath(long_term_memory_file)
 
         def _mut_hb(cache: dict) -> dict:
             hb_map = cache.setdefault("_bot_process_heartbeats", {})
@@ -321,8 +338,22 @@ def run_bot(
                 "pid": os.getpid(),
                 "ws_latency_ms": ws_ms,
                 "timestamp": now_h,
+                "channel_config_file": abs_ch_cfg,
+                "user_profiles_file": abs_uprof,
+                "long_term_memory_file": abs_ltm,
                 "model_telemetry": model_tel,
             }
+            if ch_meta_snapshot:
+                ch_dir = cache.setdefault("_channel_metadata", {})
+                if not isinstance(ch_dir, dict):
+                    ch_dir = {}
+                ch_dir.update(ch_meta_snapshot)
+                cache["_channel_metadata"] = ch_dir
+            reg = cache.get("_active_bots", {})
+            if isinstance(reg, dict) and b_id_str in reg and isinstance(reg[b_id_str], dict):
+                reg[b_id_str]["channel_config_file"] = abs_ch_cfg
+                reg[b_id_str]["user_profiles_file"] = abs_uprof
+                reg[b_id_str]["long_term_memory_file"] = abs_ltm
             return cache
 
         try:
@@ -620,6 +651,7 @@ def run_bot(
         nonlocal random_loop_started, extracted_voice_role, extracted_voice_style, slash_tree_synced
         print(f"[STARTUP] Bot authenticated as {client.user.display_name} (ID: {client.user.id})")
         register_active_bot(shared_image_cache_file, client.user.id, client.user.display_name, keywords)
+        record_ipc_heartbeat()
         if hub_cmd_tree is not None and not slash_tree_synced:
             slash_tree_synced = True
             async def _sync_slash_bg():
@@ -692,6 +724,10 @@ def run_bot(
 
     @client.event
     async def on_message(message: discord.Message):
+        nonlocal text_model, vision_model, image_gen_model, voice_model, tts_voice
+        nonlocal temperature, top_p, output_length, context_window, emoji_context_length
+        nonlocal chance_to_respond, random_emoji_chance, default_random_interval
+        nonlocal enable_vision, enable_gifs, enable_image_gen, enable_voice, keywords
         if message.author == client.user:
             return
 
@@ -757,9 +793,41 @@ def run_bot(
             return
 
         # ======================================================================
-        # CORE EVENT ROUTING
+        # CORE EVENT ROUTING (WITH 0ms LIVE RUNTIME CONFIG OVERRIDES)
         # ======================================================================
-        conf = load_json_file(channel_config_file, {}).get(channel_id, {})
+
+        scache_rt = load_json_file(shared_image_cache_file, {})
+        rt_overrides_map = scache_rt.get("_runtime_bot_overrides", {}) if isinstance(scache_rt.get("_runtime_bot_overrides"), dict) else {}
+        my_rt = (
+            rt_overrides_map.get(str(client.user.id))
+            or rt_overrides_map.get(client.user.display_name.lower())
+            or {}
+        )
+        if isinstance(my_rt, dict) and my_rt:
+            text_model = str(my_rt.get("text_model", text_model))
+            vision_model = str(my_rt.get("vision_model", vision_model))
+            image_gen_model = str(my_rt.get("image_gen_model", image_gen_model))
+            voice_model = str(my_rt.get("voice_model", voice_model))
+            tts_voice = str(my_rt.get("tts_voice", tts_voice))
+            temperature = float(my_rt.get("temperature", temperature))
+            top_p = float(my_rt.get("top_p", top_p))
+            output_length = int(my_rt.get("output_length", output_length))
+            context_window = int(my_rt.get("context_window", context_window))
+            emoji_context_length = int(my_rt.get("emoji_context_length", emoji_context_length))
+            chance_to_respond = float(my_rt.get("chance_to_respond", chance_to_respond))
+            random_emoji_chance = float(my_rt.get("random_emoji_chance", random_emoji_chance))
+            default_random_interval = int(my_rt.get("default_random_interval", default_random_interval))
+            enable_vision = bool(my_rt.get("enable_vision", enable_vision))
+            enable_gifs = bool(my_rt.get("enable_gifs", enable_gifs))
+            enable_image_gen = bool(my_rt.get("enable_image_gen", enable_image_gen))
+            enable_voice = bool(my_rt.get("enable_voice", enable_voice))
+            if isinstance(my_rt.get("keywords"), list):
+                keywords = my_rt["keywords"]
+
+        conf_map_all = load_json_file(channel_config_file, {})
+        conf = conf_map_all.get(channel_id, conf_map_all.get(str(channel_id), {}))
+        if not isinstance(conf, dict):
+            conf = {}
         if not conf.get("enabled", True):
             if client.user.mentioned_in(message):
                 try:
@@ -895,6 +963,15 @@ def run_bot(
                 else:
                     break
 
+        # Check when THIS bot last spoke in this channel so it doesn't double-post when a fellow bot
+        # co-star replies 2 seconds after this bot already answered the same human!
+        last_self_post_ts = 0.0
+        for msg in reversed(chat_history_list[-6:]):
+            if isinstance(msg, dict) and msg.get("author_id") == client.user.id and msg.get("role") == "assistant":
+                last_self_post_ts = float(msg.get("timestamp", 0.0) or 0.0)
+                break
+        just_spoke_seconds_ago = (time.time() - last_self_post_ts) < 14.0
+
         # Allow a responsive 60s cooldown when a fellow bot directly addresses/replies to this bot,
         # while keeping a 240s cooldown for unprompted bot-to-bot chime-ins (capped at 2 consecutive bot turns)
         bot_to_bot_cooldown = 60 if addressed_by_fellow_bot else 240
@@ -934,7 +1011,7 @@ def run_bot(
                     await message.channel.send(f"*(🤐 {client.user.display_name} is in react-only mode here.)*")
                 except Exception:
                     pass
-        elif is_author_bot and (bot_streak >= 2 or time_since_last_b2b < bot_to_bot_cooldown):
+        elif is_author_bot and (bot_streak >= 2 or time_since_last_b2b < bot_to_bot_cooldown or just_spoke_seconds_ago):
             pass
         elif is_relevant_trigger:
             will_respond = True
@@ -1661,6 +1738,10 @@ def run_bot(
 
                         if not reply:
                             is_error_reply = True
+                            if is_author_bot or not is_explicit_trigger or just_spoke_seconds_ago:
+                                mark_turn_wave_complete(shared_image_cache_file, message.id, client.user.id)
+                                print(f"[{client.user.display_name}] [INFO] Suppressing public error notice on non-explicit/follow-up turn after retry drop.")
+                                return
                             if res is not None and res.status_code != 200:
                                 final_reply = f"*(API Error {res.status_code} - Provider busy. Try again in a moment.)*"
                             else:
@@ -1896,7 +1977,19 @@ def run_bot(
                                     else:
                                         print(f"[{client.user.display_name}] [INFO] Suppressed unsolicited GIF ('{candidate_gif_term}') to keep GIF usage low.")
                             reply = GIF_STRIP_REGEX.sub('', reply).strip()
-                            reply = clean_and_compact_reply(reply)
+                            reply = REACTION_FOOTER_STRIP_REGEX.sub('', reply).strip()
+                            recent_user_echo_pool = [
+                                str(m.get("content", ""))
+                                for m in raw_history[-6:]
+                                if isinstance(m, dict) and m.get("role") == "user" and not m.get("author_is_bot")
+                            ] + [clean_content, combined_recent_prompt]
+                            reply_before_echo = reply
+                            reply = clean_and_compact_reply(reply, recent_user_messages=recent_user_echo_pool)
+                            if not reply and reply_before_echo:
+                                print(f"[{client.user.display_name}] [ANTI-ECHO GUARD] Blocked verbatim echo of user message: '{reply_before_echo[:80]}'")
+                                if not final_gif and not img_prompt and not raw_voice_content:
+                                    mark_turn_wave_complete(shared_image_cache_file, message.id, client.user.id)
+                                    return
 
                             if not reply and raw_voice_content:
                                 reply = derive_chat_text_from_voice(raw_voice_content)

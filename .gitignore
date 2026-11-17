@@ -12,6 +12,7 @@ __pycache__/
 *.tmp
 cloudflared
 cloudflared.exe
+**/orchestrator.pid
 
 # Bot Memory and Logs
 bots/bot_info/bot_logs/*

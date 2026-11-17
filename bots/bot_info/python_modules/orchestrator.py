@@ -9,6 +9,7 @@ import glob
 import socket
 import shutil
 import secrets
+import hashlib
 import random
 import signal
 import subprocess
@@ -44,18 +45,66 @@ from memory_and_context import (
 # ==============================================================================
 # ORCHESTRATOR CONSTANTS, FINOPS PRICING MATRIX & PORT AUTO-SCANNER
 # ==============================================================================
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT_START = 8765
 DEFAULT_PORT_END = 8799
 
-# DeepInfra approximate per-1M token / per-call pricing for FinOps Estimator (#5)
+# Exact DeepInfra per-1M token & per-image pricing matrix (from official DeepInfra pricing tables)
 MODEL_FINOPS_PRICING = {
-    "Qwen3-235B": {"in_per_1m": 0.18, "out_per_1m": 0.54},
-    "Qwen3-30B-A3B": {"in_per_1m": 0.06, "out_per_1m": 0.18},
-    "Qwen3-VL-235B": {"in_per_1m": 0.25, "out_per_1m": 0.75},
+    # Qwen Text, Coder & Vision Models ($ per 1M input / $ per 1M output)
+    "Qwen4-Max": {"in_per_1m": 1.413, "cached_in_per_1m": 0.071, "out_per_1m": 4.24},
+    "Qwen3.8-Max": {"in_per_1m": 1.65, "cached_in_per_1m": 0.206, "out_per_1m": 4.951},
+    "Qwen3.7-Max": {"in_per_1m": 2.50, "cached_in_per_1m": 0.50, "out_per_1m": 7.50},
+    "Qwen3.8-Flash": {"in_per_1m": 0.113, "cached_in_per_1m": 0.0141, "out_per_1m": 0.382},
+    "Qwen3.8-27B": {"in_per_1m": 0.15, "cached_in_per_1m": 0.0375, "out_per_1m": 1.875},
+    "Qwen3.6-35B-A3B": {"in_per_1m": 0.10, "cached_in_per_1m": 0.10, "out_per_1m": 0.95},
+    "Qwen3.6-27B": {"in_per_1m": 0.32, "out_per_1m": 3.20},
+    "Qwen3.5-397B-A17B": {"in_per_1m": 0.45, "cached_in_per_1m": 0.22, "out_per_1m": 3.00},
+    "Qwen3.5-35B-A3B": {"in_per_1m": 0.14, "cached_in_per_1m": 0.05, "out_per_1m": 1.00},
+    "Qwen3.5-27B": {"in_per_1m": 0.26, "out_per_1m": 2.60},
+    "Qwen3.5-9B": {"in_per_1m": 0.10, "out_per_1m": 0.15},
+    "Qwen3-VL-235B-A22B-Instruct": {"in_per_1m": 0.20, "cached_in_per_1m": 0.11, "out_per_1m": 0.88},
+    "Qwen3-VL-235B": {"in_per_1m": 0.20, "cached_in_per_1m": 0.11, "out_per_1m": 0.88},
+    "Qwen3-VL-30B-A3B-Instruct": {"in_per_1m": 0.15, "out_per_1m": 0.60},
+    "Qwen3-VL-30B": {"in_per_1m": 0.15, "out_per_1m": 0.60},
+    "Qwen3-Next-80B-A3B-Instruct": {"in_per_1m": 0.09, "out_per_1m": 1.10},
+    "Qwen3-Coder-480B-A35B-Instruct-Turbo": {"in_per_1m": 0.30, "cached_in_per_1m": 0.10, "out_per_1m": 1.00},
+    "Qwen3-235B-A22B-Instruct-2507": {"in_per_1m": 0.09, "out_per_1m": 0.55},
+    "Qwen3-235B": {"in_per_1m": 0.09, "out_per_1m": 0.55},
+    "Qwen3-32B": {"in_per_1m": 0.08, "out_per_1m": 0.28},
+    "Qwen3-30B-A3B": {"in_per_1m": 0.12, "out_per_1m": 0.50},
+    "Qwen3-14B": {"in_per_1m": 0.12, "out_per_1m": 0.24},
+    "Qwen2.5-72B-Instruct": {"in_per_1m": 0.36, "out_per_1m": 0.40},
     "Qwen2.5-VL-32B": {"in_per_1m": 0.12, "out_per_1m": 0.36},
-    "Llama-3.3-70B": {"in_per_1m": 0.12, "out_per_1m": 0.30},
-    "FLUX-1-schnell": {"per_call": 0.0015},
+    # Llama Models
+    "Llama-4-Scout-17B-16E": {"in_per_1m": 0.10, "out_per_1m": 0.30},
+    "Llama-Guard-4-12B": {"in_per_1m": 0.18, "out_per_1m": 0.18},
+    "Llama-3.3-70B-Instruct-Turbo": {"in_per_1m": 0.10, "out_per_1m": 0.32},
+    "Llama-3.3-70B": {"in_per_1m": 0.10, "out_per_1m": 0.32},
+    "Meta-Llama-3.1-8B-Instruct-Turbo": {"in_per_1m": 0.02, "out_per_1m": 0.04},
+    "Llama-3.2-90B-Vision": {"in_per_1m": 0.35, "out_per_1m": 0.40},
+    # Gemini Models
+    "gemini-3.7-flash": {"in_per_1m": 0.75, "out_per_1m": 3.75},
+    "gemini-3.5-flash": {"in_per_1m": 1.50, "out_per_1m": 9.00},
+    "gemini-3.1-flash-lite": {"in_per_1m": 0.25, "out_per_1m": 1.50},
+    "gemini-3.1-pro": {"in_per_1m": 2.00, "out_per_1m": 12.00},
+    "gemini-2.5-pro": {"in_per_1m": 1.25, "out_per_1m": 10.00},
+    "gemini-2.5-flash": {"in_per_1m": 0.30, "out_per_1m": 2.50},
+    # Gemma Models
+    "gemma-4-31B-it-Ultra": {"in_per_1m": 0.27, "out_per_1m": 0.76},
+    "gemma-4-31B-it-turbo": {"in_per_1m": 0.09, "cached_in_per_1m": 0.05, "out_per_1m": 0.34},
+    "gemma-4-31B-it": {"in_per_1m": 0.20, "out_per_1m": 0.40},
+    # FLUX Image Generation Models (1024x1024 standard resolution)
+    # FLUX-1-schnell: $0.0005 x (w/1024) x (h/1024) x iters (default 4 steps = $0.0020, 1 step = $0.0005)
+    "FLUX-2-dev": {"per_call": 0.0100},
+    "FLUX-2-klein-9b": {"per_call": 0.0150},
+    "FLUX-2-klein-4b": {"per_call": 0.0140},
+    "FLUX-2-max": {"per_call": 0.0700},
+    "FLUX-2-pro": {"per_call": 0.0150},
+    "FLUX-1.1-pro": {"per_call": 0.0400},
+    "FLUX-1-dev": {"per_call": 0.0090},
+    "FLUX-1-schnell": {"per_call": 0.0020},
+    # Audio & Voice Models
     "MiMo-V2.5-tts": {"per_call": 0.0020},
     "whisper-large-v3-turbo": {"per_call": 0.0005},
 }
@@ -259,6 +308,9 @@ def inspect_bot_script_config(script_path: str) -> dict:
         "filename": os.path.basename(script_path),
         "path": script_path,
         "token_env_var": "",
+        "channel_config_file": "",
+        "user_profiles_file": "",
+        "long_term_memory_file": "",
         "text_model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
         "vision_model": "Qwen/Qwen3-VL-235B-A22B-Instruct",
         "image_gen_model": "black-forest-labs/FLUX-1-schnell",
@@ -302,6 +354,14 @@ def inspect_bot_script_config(script_path: str) -> dict:
     m_tok = re.search(r'TOKEN\s*=\s*os\.getenv\(\s*["\']([^"\']+)["\']\s*\)', src)
     if m_tok:
         info["token_env_var"] = m_tok.group(1)
+
+    s_dir = os.path.dirname(os.path.abspath(script_path))
+    m_ch_cfg = re.search(r'CHANNEL_CONFIG_FILE\s*=\s*os\.path\.join\([^\)]*["\']([^"\']+_channel_configs\.json|channel_configs\.json)["\']\s*\)', src)
+    if m_ch_cfg:
+        info["channel_config_file"] = os.path.join(s_dir, "bot_info", "config_files", m_ch_cfg.group(1))
+    m_up_cfg = re.search(r'USER_PROFILES_FILE\s*=\s*os\.path\.join\([^\)]*["\']([^"\']+_user_profiles\.json|user_profiles\.json)["\']\s*\)', src)
+    if m_up_cfg:
+        info["user_profiles_file"] = os.path.join(s_dir, "bot_info", "long_term_memory", m_up_cfg.group(1))
 
     try:
         tree = ast.parse(src)
@@ -1055,7 +1115,7 @@ def compute_finops_and_model_health_matrix(shared_cache_data: dict) -> dict:
 
         cost = 0.0
         matched_pricing = None
-        for price_key, p_info in MODEL_FINOPS_PRICING.items():
+        for price_key, p_info in sorted(MODEL_FINOPS_PRICING.items(), key=lambda x: len(x[0]), reverse=True):
             if price_key.lower() in m_key.lower():
                 matched_pricing = p_info
                 break
@@ -1140,13 +1200,25 @@ def build_control_plane_state_snapshot(
                 for item in sub_l:
                     if item not in ltm:
                         ltm.append(item)
+    per_bot_channel_configs: dict[str, dict] = {}
+    bot_cfg_files_map = supervisor.get_bot_channel_config_files_map(channel_config_file)
+    for b_key_name, cf_path in bot_cfg_files_map.items():
+        sub_c = load_json_file(cf_path, {}) if (cf_path and os.path.exists(cf_path)) else {}
+        clean_sub = {}
+        if isinstance(sub_c, dict):
+            for ck, cv in sub_c.items():
+                if isinstance(cv, dict) and not str(ck).startswith("guild_welcome_"):
+                    clean_sub[str(ck)] = cv
+                    ch_configs.setdefault(str(ck), {}).update(cv)
+        per_bot_channel_configs[b_key_name] = clean_sub
+
     if cfg_dir and os.path.isdir(cfg_dir):
         for cf_path in sorted(glob.glob(os.path.join(cfg_dir, "*_channel_configs.json"))):
             sub_c = load_json_file(cf_path, {})
             if isinstance(sub_c, dict):
                 for ck, cv in sub_c.items():
-                    if isinstance(cv, dict):
-                        ch_configs.setdefault(ck, {}).update(cv)
+                    if isinstance(cv, dict) and not str(ck).startswith("guild_welcome_"):
+                        ch_configs.setdefault(str(ck), {}).update(cv)
 
     # 1. Social Graph Nodes & Signed Directed Edges (Multi-Bot Source-Aware + Persona-Bio Seeded!)
     active_bots_reg = scache.get("_active_bots", {}) if isinstance(scache.get("_active_bots"), dict) else {}
@@ -1324,7 +1396,10 @@ def build_control_plane_state_snapshot(
         "subconscious_xray_log": (scache.get("_subconscious_xray_log", []) or [])[-30:],
         "episodic_chapters": scache.get("_episodic_chapters", {}),
         "memory_table": memory_rows[-180:],
-        "channel_configs": {str(k): v for k, v in (ch_configs or {}).items()},
+        "channel_configs": {str(k): v for k, v in (ch_configs or {}).items() if not str(k).startswith("guild_welcome_")},
+        "per_bot_channel_configs": per_bot_channel_configs,
+        "channel_directory": supervisor.build_channel_directory(scache, ch_configs),
+        "hot_reload_enabled": bool(supervisor.enable_hot_reload),
         "tunnel_info": {
             "status": supervisor.tunnel_manager.status if supervisor.tunnel_manager else "OFFLINE",
             "provider": supervisor.tunnel_manager.provider if supervisor.tunnel_manager else "stopped",
@@ -1567,6 +1642,8 @@ class MultiBotSupervisor:
         self.log_ring_buffer: list[dict] = []
         self.sse_queues: set[asyncio.Queue] = set()
         self.watched_mtimes: dict[str, int] = {}
+        self.watched_hashes: dict[str, str] = {}
+        self.last_hot_reload_ts: float = 0.0
         self.tunnel_manager: BuiltInPublicTunnelManager | None = None
         self.running = True
         self._snapshot_watched_files()
@@ -1577,13 +1654,86 @@ class MultiBotSupervisor:
             self.layout["bots_dir"],
         ]))
 
+    @staticmethod
+    def _compute_file_sha256(filepath: str) -> str:
+        try:
+            with open(filepath, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except Exception:
+            return ""
+
+    def _record_file_snapshot(self, filepath: str):
+        abs_p = os.path.abspath(filepath)
+        try:
+            self.watched_mtimes[abs_p] = os.stat(abs_p).st_mtime_ns
+            h = self._compute_file_sha256(abs_p)
+            if h:
+                self.watched_hashes[abs_p] = h
+        except Exception:
+            pass
+
     def _snapshot_watched_files(self):
         for folder in self._get_watch_folders():
             for py_file in glob.glob(os.path.join(folder, "*.py")):
-                try:
-                    self.watched_mtimes[os.path.abspath(py_file)] = os.stat(py_file).st_mtime_ns
-                except Exception:
-                    pass
+                self._record_file_snapshot(py_file)
+
+    def get_bot_channel_config_files_map(self, default_channel_config_file: str = "") -> dict[str, str]:
+        """Returns a map of `{bot_name: channel_config_json_path}` for every supervised bot."""
+        cfg_dir = os.path.dirname(os.path.abspath(default_channel_config_file or self.layout["channel_config_file"]))
+        scache = load_json_file(self.layout["shared_cache_file"], {})
+        hbs = scache.get("_bot_process_heartbeats", {}) if isinstance(scache.get("_bot_process_heartbeats"), dict) else {}
+        out: dict[str, str] = {}
+        for b_name, mb in self.bots.items():
+            inspected = inspect_bot_script_config(mb.script_path)
+            c_path = inspected.get("channel_config_file", "")
+            if not c_path:
+                for _, hb in hbs.items():
+                    if isinstance(hb, dict) and (hb.get("pid") == mb.pid or str(hb.get("bot_name", "")).lower().replace(" ", "_") == b_name.lower()):
+                        c_path = hb.get("channel_config_file", "")
+                        break
+            if not c_path:
+                c_path = os.path.join(cfg_dir, f"{b_name}_channel_configs.json")
+            out[b_name] = c_path
+        return out
+
+    def build_channel_directory(self, scache: dict | None = None, merged_ch_configs: dict | None = None) -> dict[str, dict]:
+        """Builds a human-readable directory of known Discord channels (`#name`, guild, active topic) keyed by channel ID."""
+        scache = scache or {}
+        ch_meta = scache.get("_channel_metadata", {}) if isinstance(scache.get("_channel_metadata"), dict) else {}
+        room_states = scache.get("_room_state", {}) if isinstance(scache.get("_room_state"), dict) else {}
+        cmem = load_json_file(self.layout["chat_memory_file"], {})
+        directory: dict[str, dict] = {}
+
+        all_ids = set()
+        for k in ch_meta.keys():
+            if str(k).isdigit():
+                all_ids.add(str(k))
+        for k in (merged_ch_configs or {}).keys():
+            if str(k).isdigit():
+                all_ids.add(str(k))
+        for k in room_states.keys():
+            if str(k).isdigit() and str(k) != "0":
+                all_ids.add(str(k))
+        if isinstance(cmem, dict):
+            for k in cmem.keys():
+                if str(k).isdigit():
+                    all_ids.add(str(k))
+
+        for cid in sorted(all_ids):
+            meta = ch_meta.get(cid, {}) if isinstance(ch_meta.get(cid), dict) else {}
+            r_st = room_states.get(cid, {}) if isinstance(room_states.get(cid), dict) else {}
+            ch_name = str(meta.get("name", "") or "").strip()
+            guild_name = str(meta.get("guild", "") or "").strip()
+            topic = str(r_st.get("active_topic", "") or "").strip()
+            label = f"#{ch_name}" if ch_name else (f"Channel #{cid[-4:]} ({topic[:24]})" if topic else f"Channel #{cid[-6:]}")
+            directory[cid] = {
+                "id": cid,
+                "name": ch_name or f"channel-{cid[-6:]}",
+                "label": label,
+                "guild": guild_name,
+                "topic": topic,
+            }
+        return directory
 
     def append_log(self, bot_name: str, line: str, level: str = "INFO"):
         now_dt = datetime.now()
@@ -1791,24 +1941,41 @@ class MultiBotSupervisor:
 
     async def rolling_hot_reload_all(self, changed_file: str):
         """
-        Orchestrator Upgrade #2 — AST-Validated Zero-Downtime Rolling Hot-Reload:
-        Validates syntax via `ast.parse()` + `py_compile` first, then restarts active bots
-        one at a time with a 2.0s stagger so the server never goes completely offline.
+        Orchestrator Upgrade #2 — AST-Validated, Rate-Limit-Safe Rolling Hot-Reload:
+        1. Enforces a 30-second cooldown between reloads so rapid file saves never cycle
+           bots on/off or trigger Discord Gateway IDENTIFY rate limits.
+        2. If `changed_file` is a single bot launcher script (e.g. `cat_bot.py`), restarts
+           ONLY that specific bot rather than cycling the entire fleet.
+        3. Uses a 6.0-second gateway-safe stagger when rolling-restarting shared core modules.
         """
+        now_t = time.time()
+        if (now_t - self.last_hot_reload_ts) < 30.0:
+            return
         ok, err_msg = validate_python_file_ast(changed_file)
         if not ok:
             self.append_log("HotReload", f"ABORTED hot-reload! {err_msg}", "ERROR")
             return
 
+        self.last_hot_reload_ts = now_t
+        bname_only = os.path.basename(changed_file)
+        stem_only = os.path.splitext(bname_only)[0]
+
+        if bname_only not in CORE_FRAMEWORK_MODULES and stem_only in self.bots:
+            mb = self.bots[stem_only]
+            if mb.status == "RUNNING":
+                self.append_log("HotReload", f"AST validated '{bname_only}'. Reloading single bot '{stem_only}'...", "INFO")
+                await self.restart_bot(stem_only, unquarantine=False)
+            return
+
         self.append_log(
             "HotReload",
-            f"AST validated '{os.path.basename(changed_file)}'. Starting zero-downtime rolling reload...",
+            f"AST validated core module '{bname_only}'. Starting gateway-safe rolling reload (6s stagger)...",
             "INFO",
         )
         for b_name, mb in list(self.bots.items()):
             if mb.status == "RUNNING":
                 await self.restart_bot(b_name, unquarantine=False)
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(6.0)
 
     async def telemetry_and_watchdog_loop(self, shared_cache_file: str):
         """
@@ -1828,7 +1995,7 @@ class MultiBotSupervisor:
                         mb.ram_mb = prof["ram_mb"]
                         mb.cpu_percent = prof["cpu_percent"]
 
-                # 2. Check AST Hot-Reload file watcher across python_modules/ and bots/
+                # 2. Check AST + SHA256 Content-Verified Hot-Reload file watcher
                 if self.enable_hot_reload:
                     all_watched = [
                         p
@@ -1837,7 +2004,7 @@ class MultiBotSupervisor:
                     ]
                     for py_path in all_watched:
                         abs_p = os.path.abspath(py_path)
-                        if os.path.basename(abs_p) == "orchestrator.py":
+                        if os.path.basename(abs_p) in ("orchestrator.py", "test_framework.py"):
                             continue
                         try:
                             cur_ns = os.stat(abs_p).st_mtime_ns
@@ -1846,10 +2013,16 @@ class MultiBotSupervisor:
                         prev_ns = self.watched_mtimes.get(abs_p)
                         if prev_ns is not None and cur_ns > prev_ns:
                             self.watched_mtimes[abs_p] = cur_ns
-                            await self.rolling_hot_reload_all(abs_p)
-                            break
+                            cur_hash = self._compute_file_sha256(abs_p)
+                            prev_hash = self.watched_hashes.get(abs_p)
+                            if cur_hash and cur_hash != prev_hash:
+                                self.watched_hashes[abs_p] = cur_hash
+                                await self.rolling_hot_reload_all(abs_p)
+                                break
                         else:
                             self.watched_mtimes[abs_p] = cur_ns
+                            if abs_p not in self.watched_hashes:
+                                self.watched_hashes[abs_p] = self._compute_file_sha256(abs_p)
 
                 # 3. Periodic Orphaned Lock & Temp Reaper (every 60s)
                 if (time.time() - last_reap_ts) >= 60.0:
@@ -2055,7 +2228,7 @@ async def start_webui_http_server(
                         return
                     with open(target_path, "w", encoding="utf-8", newline="\n") as sf:
                         sf.write(new_src)
-                    supervisor.watched_mtimes[os.path.abspath(target_path)] = os.stat(target_path).st_mtime_ns
+                    supervisor._record_file_snapshot(target_path)
                     if not mb:
                         new_key = os.path.splitext(os.path.basename(target_path))[0]
                         supervisor.bots[new_key] = ManagedBotProcess(target_path)
@@ -2066,10 +2239,10 @@ async def start_webui_http_server(
                     _send_json(200, {"ok": True, "bot": b_name})
 
                 elif path == "/api/bot/update_config":
-                    # [E] Visual Bot Config Editor (updates constants + optional restart)
+                    # [E] Visual Bot Config Editor (updates constants on disk + 0ms live IPC override without cycling Discord gateway!)
                     b_name = str(req_json.get("bot", "")).strip()
                     updates = req_json.get("updates", {})
-                    auto_restart = bool(req_json.get("restart", True))
+                    auto_restart = bool(req_json.get("restart", False))
                     mb = supervisor.bots.get(b_name)
                     if not mb or not isinstance(updates, dict):
                         _send_json(404, {"ok": False, "error": f"Bot '{b_name}' not found"})
@@ -2078,8 +2251,20 @@ async def start_webui_http_server(
                         if not ok_u:
                             _send_json(400, {"ok": False, "error": msg_u})
                         else:
-                            supervisor.watched_mtimes[os.path.abspath(mb.script_path)] = os.stat(mb.script_path).st_mtime_ns
-                            supervisor.append_log("BotStudio", f"Updated config constants in '{os.path.basename(mb.script_path)}'.", "INFO")
+                            supervisor._record_file_snapshot(mb.script_path)
+                            # Push 0ms live runtime overrides into shared_image_cache.json so the running bot
+                            # updates immediately on the next Discord message WITHOUT disconnecting from Discord!
+                            def _mut_rt(sc):
+                                rt_map = sc.setdefault("_runtime_bot_overrides", {})
+                                rt_map.setdefault(b_name.lower(), {}).update(updates)
+                                for b_id_s, hb in (sc.get("_bot_process_heartbeats", {}) or {}).items():
+                                    if isinstance(hb, dict) and (hb.get("pid") == mb.pid or str(hb.get("bot_name", "")).lower().replace(" ", "_") == b_name.lower()):
+                                        rt_map.setdefault(str(b_id_s), {}).update(updates)
+                                        if hb.get("bot_name"):
+                                            rt_map.setdefault(str(hb["bot_name"]).lower(), {}).update(updates)
+                                return sc
+                            update_json_file(shared_cache_file, {}, _mut_rt)
+                            supervisor.append_log("BotStudio", f"Live-applied config updates to '{b_name}' (0ms hot-swap).", "INFO")
                             if auto_restart and mb.status == "RUNNING":
                                 await supervisor.restart_bot(b_name, unquarantine=True)
                             _send_json(200, {"ok": True, "bot": b_name})
@@ -2114,7 +2299,7 @@ async def start_webui_http_server(
                         _send_json(400, {"ok": False, "error": path_or_err})
                     else:
                         supervisor.bots[safe_n] = ManagedBotProcess(path_or_err)
-                        supervisor.watched_mtimes[os.path.abspath(path_or_err)] = os.stat(path_or_err).st_mtime_ns
+                        supervisor._record_file_snapshot(path_or_err)
                         supervisor.append_log("BotWizard", f"Created new bot '{safe_n}.py' and saved token to .env!", "INFO")
                         if req_json.get("start_now", False):
                             await supervisor.start_bot(safe_n)
@@ -2184,16 +2369,62 @@ async def start_webui_http_server(
                     _send_json(200, {"ok": True})
 
                 elif path == "/api/channel/config":
-                    # Upgrade #12 — Live Per-Channel Sliders & Media Toggles
-                    ch_id_raw = str(req_json.get("channel_id", "")).strip()
+                    # Upgrade #12 — Live Per-Bot, Per-Channel Sliders & Capability Toggles
+                    target_bot = str(req_json.get("bot", "__ALL__") or "__ALL__").strip()
+                    ch_id_raw = str(req_json.get("channel_id", "")).strip().lstrip("#")
                     updates = req_json.get("updates", {})
                     if ch_id_raw and isinstance(updates, dict):
                         ch_key = int(ch_id_raw) if ch_id_raw.isdigit() else ch_id_raw
+                        bot_cfg_map = supervisor.get_bot_channel_config_files_map(channel_config_file)
+                        target_files = []
+                        if target_bot == "__ALL__" or not target_bot:
+                            target_files = list(set(list(bot_cfg_map.values()) + [channel_config_file]))
+                        elif target_bot in bot_cfg_map:
+                            target_files = [bot_cfg_map[target_bot]]
+                        else:
+                            # Fuzzy match by display name vs script name
+                            norm_tb = re.sub(r"[^a-z0-9]", "", target_bot.lower())
+                            for bk, fpath in bot_cfg_map.items():
+                                norm_bk = re.sub(r"[^a-z0-9]", "", bk.lower())
+                                if norm_tb == norm_bk or norm_tb in norm_bk or norm_bk in norm_tb:
+                                    target_files.append(fpath)
+                            if not target_files:
+                                target_files = [channel_config_file]
+
                         def _mut_ch(c_map):
-                            c_map.setdefault(ch_key, {}).update(updates)
+                            cur_entry = c_map.get(ch_key, c_map.get(str(ch_key), {}))
+                            if not isinstance(cur_entry, dict):
+                                cur_entry = {}
+                            cur_entry.update(updates)
+                            c_map.pop(str(ch_key), None)
+                            c_map[ch_key] = cur_entry
                             return c_map
-                        update_json_file(channel_config_file, {}, _mut_ch)
-                    _send_json(200, {"ok": True})
+
+                        for tf in target_files:
+                            if tf:
+                                update_json_file(tf, {}, _mut_ch)
+                        supervisor.append_log("ChannelConfig", f"Updated channel {ch_key} for '{target_bot}': {updates}", "INFO")
+                    _send_json(200, {"ok": True, "bot": target_bot, "channel_id": ch_id_raw})
+
+                elif path == "/api/orchestrator/hot_reload":
+                    enabled_val = req_json.get("enabled")
+                    if enabled_val is None:
+                        supervisor.enable_hot_reload = not supervisor.enable_hot_reload
+                    else:
+                        supervisor.enable_hot_reload = bool(enabled_val)
+                    supervisor._snapshot_watched_files()
+                    supervisor.append_log("HotReload", f"AST Hot-Reload Watcher set to: {supervisor.enable_hot_reload}", "INFO")
+                    _send_json(200, {"ok": True, "hot_reload_enabled": supervisor.enable_hot_reload})
+
+                elif path == "/api/orchestrator/shutdown":
+                    supervisor.append_log("Supervisor", "Shutdown requested via Control Plane API. Stopping all bots...", "WARN")
+                    _send_json(200, {"ok": True, "status": "SHUTTING_DOWN"})
+                    await writer.drain()
+                    writer.close()
+                    supervisor.running = False
+                    for k_name in list(supervisor.bots.keys()):
+                        await supervisor.stop_bot(k_name, manual=True)
+                    return
 
                 elif path == "/api/tunnel/toggle":
                     action = str(req_json.get("action", "toggle")).strip().lower()
@@ -2272,7 +2503,8 @@ async def async_main():
     parser.add_argument("--autostart", action="store_true", help="Automatically start all bots on launch (default: False — start via Web-UI)")
     parser.add_argument("--tunnel", action="store_true", help="Automatically start a public HTTPS tunnel (via built-in ssh localhost.run or cloudflared)")
     parser.add_argument("--no-webui", action="store_true", help="Disable the local Web-UI HTTP/SSE server")
-    parser.add_argument("--no-hot-reload", action="store_true", help="Disable AST rolling hot-reload watcher")
+    parser.add_argument("--hot-reload", action="store_true", help="Enable automatic file-watcher hot-reloading on startup (can also be toggled in Web-UI)")
+    parser.add_argument("--no-hot-reload", action="store_true", help="Disable AST rolling hot-reload watcher (default)")
     args = parser.parse_args()
 
     layout = resolve_project_layout()
@@ -2289,7 +2521,8 @@ async def async_main():
         print(f"[ORCHESTRATOR] Startup reaper cleaned {reaped} stale .lock/.tmp file(s).")
 
     scripts = [os.path.abspath(p) for p in args.bots] if args.bots else discover_bot_launcher_scripts(layout["bots_dir"])
-    supervisor = MultiBotSupervisor(scripts, data_dir=layout["python_modules_dir"], enable_hot_reload=(not args.no_hot_reload))
+    hot_reload_init = bool(args.hot_reload and not args.no_hot_reload)
+    supervisor = MultiBotSupervisor(scripts, data_dir=layout["python_modules_dir"], enable_hot_reload=hot_reload_init)
 
     shared_cache_file = layout["shared_cache_file"]
     user_profiles_file = layout["user_profiles_file"]
@@ -2369,6 +2602,33 @@ async def async_main():
             "INFO",
         )
 
+    pid_file_path = os.path.join(layout["bot_info_dir"], "orchestrator.pid")
+    try:
+        with open(pid_file_path, "w", encoding="utf-8") as pf:
+            json.dump({
+                "pid": os.getpid(),
+                "port": bound_port if not args.no_webui else 0,
+                "host": args.host,
+                "local_url": local_url if not args.no_webui else "",
+                "lan_url": lan_url if not args.no_webui else "",
+                "started_at": time.time(),
+            }, pf)
+    except Exception:
+        pass
+
+    # Register SIGTERM handler so `kill -TERM <pid>` on Linux/SSH cleanly stops all child bots before exiting
+    try:
+        loop = asyncio.get_running_loop()
+        for sig_name in ("SIGTERM", "SIGINT"):
+            sig_obj = getattr(signal, sig_name, None)
+            if sig_obj is not None:
+                try:
+                    loop.add_signal_handler(sig_obj, lambda: setattr(supervisor, "running", False))
+                except NotImplementedError:
+                    pass
+    except Exception:
+        pass
+
     try:
         await supervisor.telemetry_and_watchdog_loop(shared_cache_file)
     except asyncio.CancelledError:
@@ -2381,6 +2641,11 @@ async def async_main():
             await supervisor.stop_bot(b_name, manual=True)
         if web_server:
             web_server.close()
+        try:
+            if os.path.exists(pid_file_path):
+                os.remove(pid_file_path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

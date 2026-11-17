@@ -288,5 +288,78 @@ class TestMainBotAndOrchestrator(unittest.TestCase):
             self.assertEqual(inspected["keywords"], ["butler", "jeeves"])
 
 
+
+    def test_phase5_echo_reaction_leak_finops_and_multi_bot_hub(self):
+        # 1. Verbatim user echo & prefix echo stripping
+        self.assertEqual(
+            text_and_parsers.clean_and_compact_reply("no, fort worth", ["no, fort worth"]),
+            "",
+        )
+        self.assertEqual(
+            text_and_parsers.clean_and_compact_reply(
+                "they should AI slop remaster *giggles* only for the enhanced version to glitch",
+                ["they should AI slop remaster"],
+            ),
+            "*giggles* only for the enhanced version to glitch",
+        )
+        # 2. Reaction metadata footer & system error notice stripping
+        self.assertEqual(
+            text_and_parsers.clean_and_compact_reply(
+                "Truly a cautionary tale. [Reactions on this message: 🚨 (uwu Bot 4.0, uwu bot)]"
+            ),
+            "Truly a cautionary tale.",
+        )
+        self.assertEqual(
+            text_and_parsers.clean_and_compact_reply(
+                "Still, I tolerate her. *Just.*\n*(System: DeepInfra dropped the text request after multiple retries.)*"
+            ),
+            "Still, I tolerate her. *Just.*",
+        )
+        # 3. Disputed/questioned nickname premise filter vs explicit permission
+        self.assertTrue(
+            memory_and_context.is_misattributed_hearsay(
+                "Prefers to be called 'sammy'",
+                "Sam (Tam/Tamself)",
+                "Sam (Tam/Tamself)",
+                "did Carzen tell you to call me sammy?",
+            )
+        )
+        self.assertFalse(
+            memory_and_context.is_misattributed_hearsay(
+                "Prefers to be called 'sammy'",
+                "Sam (Tam/Tamself)",
+                "Sam (Tam/Tamself)",
+                "no it's ok to call me sammy uwu",
+            )
+        )
+        # 4. Subconscious default model & fallback inner thought synthesis
+        self.assertEqual(subconscious_engine.DEFAULT_SUBCONSCIOUS_MODEL, "Qwen/Qwen3-30B-A3B")
+        fb_thought = subconscious_engine.synthesize_fallback_inner_thought(
+            "*perks ears* oh my gosh that looks awesome!", "Carzen"
+        )
+        self.assertTrue(len(fb_thought) > 10)
+        # 5. Real DeepInfra FinOps pricing matrix verification
+        qwen_price = orchestrator.MODEL_FINOPS_PRICING.get("Qwen3-235B-A22B-Instruct-2507", {})
+        self.assertEqual(qwen_price.get("in_per_1m"), 0.09)
+        self.assertEqual(qwen_price.get("out_per_1m"), 0.55)
+        flux_price = orchestrator.MODEL_FINOPS_PRICING.get("FLUX-1-schnell", {})
+        self.assertEqual(flux_price.get("per_call"), 0.0020)
+        # 6. Multi-Bot /hub Main Menu Embed builder
+        persp = commands_and_embeds.discover_all_bot_perspectives(
+            "shared_image_cache.json", "uwu bot", "user_profiles.json", "channel_configs.json"
+        )
+        self.assertIn("uwu bot", persp)
+        hub_embed = commands_and_embeds.build_fleet_main_menu_embed(
+            shared_image_cache_file="shared_image_cache.json",
+            chat_memory_file="chat_memory.json",
+            channel_id=1564803561865355336,
+            channel_name="general",
+            active_bot_name="uwu bot",
+            bot_perspectives=persp,
+            caller_name="Carzen",
+        )
+        self.assertIn("Multi-Agent Server Hub", hub_embed.title)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

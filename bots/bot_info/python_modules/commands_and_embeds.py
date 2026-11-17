@@ -1,4 +1,6 @@
+import os
 import re
+import glob
 import time
 import asyncio
 import discord
@@ -116,9 +118,9 @@ def is_command_addressed_to_bot(
     norm_content = normalize_command_typos(raw_content)
     content_lower = norm_content.lower().strip()
 
-    # Support plain-text `/hub` or `!hub` in chat (in case Discord hasn't refreshed the client's slash popup yet)
+    # Support plain-text `/hub` or `!hub` in chat (opens the Multi-Bot Main Menu Hub)
     if re.search(r"(?:^|\s)[/!]hub\b", content_lower):
-        content_lower = re.sub(r"(?:^|\s)[/!]hub\b", " !whoami", content_lower).strip()
+        content_lower = re.sub(r"(?:^|\s)[/!]hub\b", " !hub", content_lower).strip()
         if client.user and client.user.mentioned_in(message):
             return True, content_lower
 
@@ -443,6 +445,189 @@ def build_episodic_chapters_embed(
     return embed
 
 
+def discover_all_bot_perspectives(
+    shared_image_cache_file: str,
+    default_bot_name: str,
+    default_user_profiles_file: str,
+    default_channel_config_file: str,
+) -> dict[str, dict]:
+    """
+    Discovers all bots in the server along with their individual `user_profiles_file`
+    and `channel_config_file` paths so `/hub` can switch between and manage ANY bot!
+    """
+    perspectives: dict[str, dict] = {}
+    ltm_dir = os.path.dirname(os.path.abspath(default_user_profiles_file)) if default_user_profiles_file else ""
+    cfg_dir = os.path.dirname(os.path.abspath(default_channel_config_file)) if default_channel_config_file else ""
+
+    def _infer_files_for_bot(b_name: str, hb_info: dict | None = None, reg_info: dict | None = None) -> tuple[str, str]:
+        hb_info = hb_info or {}
+        reg_info = reg_info or {}
+        up_f = hb_info.get("user_profiles_file") or reg_info.get("user_profiles_file") or ""
+        ch_f = hb_info.get("channel_config_file") or reg_info.get("channel_config_file") or ""
+        norm_b = re.sub(r"[^a-z0-9]", "", b_name.lower())
+        if (not up_f or not os.path.exists(up_f)) and ltm_dir and os.path.isdir(ltm_dir):
+            for cand_p in sorted(glob.glob(os.path.join(ltm_dir, "*_user_profiles.json"))):
+                stem = os.path.basename(cand_p).replace("_user_profiles.json", "").lower()
+                norm_s = re.sub(r"[^a-z0-9]", "", stem)
+                if norm_s and (norm_s in norm_b or norm_b in norm_s or ("cat" in norm_s and "cat" in norm_b)):
+                    up_f = cand_p
+                    break
+        if (not ch_f or not os.path.exists(ch_f)) and cfg_dir and os.path.isdir(cfg_dir):
+            for cand_c in sorted(glob.glob(os.path.join(cfg_dir, "*_channel_configs.json"))):
+                stem = os.path.basename(cand_c).replace("_channel_configs.json", "").lower()
+                norm_s = re.sub(r"[^a-z0-9]", "", stem)
+                if norm_s and (norm_s in norm_b or norm_b in norm_s or ("cat" in norm_s and "cat" in norm_b)):
+                    ch_f = cand_c
+                    break
+        return (up_f or default_user_profiles_file), (ch_f or default_channel_config_file)
+
+    scache = load_json_file(shared_image_cache_file, {}) if shared_image_cache_file else {}
+    reg = scache.get("_active_bots", {}) if isinstance(scache.get("_active_bots"), dict) else {}
+    hbs = scache.get("_bot_process_heartbeats", {}) if isinstance(scache.get("_bot_process_heartbeats"), dict) else {}
+
+    if default_bot_name:
+        perspectives[default_bot_name] = {
+            "bot_name": default_bot_name,
+            "user_profiles_file": default_user_profiles_file,
+            "channel_config_file": default_channel_config_file,
+            "ws_latency_ms": 0.0,
+            "online": True,
+        }
+
+    for b_id_str, r_info in reg.items():
+        if not isinstance(r_info, dict):
+            continue
+        disp = str(r_info.get("display_name", "") or "").strip()
+        if not disp:
+            continue
+        hb = hbs.get(str(b_id_str), {}) if isinstance(hbs.get(str(b_id_str)), dict) else {}
+        up_path, cfg_path = _infer_files_for_bot(disp, hb, r_info)
+        if disp == default_bot_name:
+            up_path = default_user_profiles_file
+            cfg_path = default_channel_config_file
+        hb_ts = float(hb.get("timestamp", r_info.get("last_seen", 0)) or 0)
+        perspectives[disp] = {
+            "bot_name": disp,
+            "user_profiles_file": up_path,
+            "channel_config_file": cfg_path,
+            "ws_latency_ms": float(hb.get("ws_latency_ms", 0.0) or 0.0),
+            "online": (time.time() - hb_ts) < 300.0 if hb_ts else True,
+        }
+
+    # Also discover any offline bot profiles on disk so they can still be inspected
+    if ltm_dir and os.path.isdir(ltm_dir):
+        for cand_p in sorted(glob.glob(os.path.join(ltm_dir, "*_user_profiles.json"))):
+            stem = os.path.basename(cand_p).replace("_user_profiles.json", "")
+            norm_s = re.sub(r"[^a-z0-9]", "", stem.lower())
+            if any(re.sub(r"[^a-z0-9]", "", k.lower()) in norm_s or norm_s in re.sub(r"[^a-z0-9]", "", k.lower()) for k in perspectives.keys()):
+                continue
+            pretty_name = stem.replace("_", " ").title()
+            cfg_cand = os.path.join(cfg_dir, f"{stem}_channel_configs.json") if cfg_dir else default_channel_config_file
+            perspectives[pretty_name] = {
+                "bot_name": pretty_name,
+                "user_profiles_file": cand_p,
+                "channel_config_file": cfg_cand if os.path.exists(cfg_cand) else default_channel_config_file,
+                "ws_latency_ms": 0.0,
+                "online": False,
+            }
+
+    return perspectives
+
+
+def build_fleet_main_menu_embed(
+    *,
+    shared_image_cache_file: str,
+    chat_memory_file: str,
+    channel_id: int,
+    channel_name: str,
+    active_bot_name: str,
+    bot_perspectives: dict[str, dict],
+    caller_name: str,
+) -> discord.Embed:
+    """
+    Builds the Multi-Bot Main Menu Hub Embed (`/hub`), displaying all server bots,
+    their channel status & parameters in `#channel_name`, the caller's standing across
+    every bot, and the live room blackboard.
+    """
+    embed = discord.Embed(
+        title=f"🏰 Multi-Agent Server Hub — Main Menu (#{channel_name})",
+        description=(
+            f"**Selected Bot Perspective:** 🤖 **{active_bot_name}**\n"
+            "*Use the **🤖 Switch Bot Perspective** menu below to inspect or configure ANY bot in the server, "
+            "or pick a member in **🔍 Switch Dossier Target**!*"
+        ),
+        color=0x00E5FF,
+    )
+
+    fleet_lines = []
+    standing_lines = []
+    for b_name, b_meta in bot_perspectives.items():
+        cfg_file = b_meta.get("channel_config_file", "")
+        up_file = b_meta.get("user_profiles_file", "")
+        cfg_all = load_json_file(cfg_file, {}) if cfg_file else {}
+        ch_cfg = cfg_all.get(channel_id, cfg_all.get(str(channel_id), {}))
+        if not isinstance(ch_cfg, dict):
+            ch_cfg = {}
+
+        en = ch_cfg.get("enabled", True)
+        ro = ch_cfg.get("react_only", False)
+        temp = ch_cfg.get("temperature", 0.78)
+        resp = ch_cfg.get("resp_chance", 0.05)
+        emo = ch_cfg.get("emoji_chance", 0.45)
+        ws_ms = b_meta.get("ws_latency_ms", 0.0)
+        ping_str = f" • `{ws_ms:.0f}ms`" if ws_ms > 0 else ""
+        mode_badge = "🔇 Disabled" if not en else ("🤐 React-Only" if ro else "🟢 Active")
+        sel_marker = "👉 " if b_name == active_bot_name else "• "
+        fleet_lines.append(
+            f"{sel_marker}🤖 **{b_name}**: {mode_badge}{ping_str} | Temp `{temp}` | Chime `{int(round(float(resp)*100))}%` | Emoji `{int(round(float(emo)*100))}%`"
+        )
+
+        # Compute caller's standing with this bot
+        uprof = load_json_file(up_file, {}) if up_file else {}
+        canon_caller = find_canonical_username(caller_name, uprof, {caller_name})
+        c_facts = uprof.get(canon_caller, []) if isinstance(uprof.get(canon_caller), list) else []
+        sc, tr, _, _ = _extract_saved_rapport_state_full(c_facts, target_name=canon_caller)
+        tier_l = _get_disposition_tier_label(sc)
+        bar_s = build_affinity_progress_bar(sc, width=8)
+        fact_cnt = len([f for f in c_facts if not RAPPORT_ENTRY_REGEX.match(str(f).strip())])
+        standing_lines.append(
+            f"• **{b_name}**: {bar_s} — *{tier_l}* (`{fact_cnt}` facts)"
+        )
+
+    if fleet_lines:
+        embed.add_field(
+            name=f"🤖 Bot Fleet & #{channel_name} Channel Settings ({len(fleet_lines)} Bots)",
+            value="\n".join(fleet_lines[:8]),
+            inline=False,
+        )
+
+    if standing_lines:
+        embed.add_field(
+            name=f"🤝 {caller_name}'s Standing Across All Bots",
+            value="\n".join(standing_lines[:8]),
+            inline=False,
+        )
+
+    scache = load_json_file(shared_image_cache_file, {}) if shared_image_cache_file else {}
+    r_state = scache.get("_room_state", {}).get(str(channel_id), {})
+    if not isinstance(r_state, dict):
+        r_state = {}
+    topic = r_state.get("active_topic", "General chat")
+    vibe = r_state.get("room_vibe", "Steady")
+    props = ", ".join(
+        f"{p.get('item')} ({p.get('ttl')}t)"
+        for p in (r_state.get("active_props") or [])
+        if isinstance(p, dict) and p.get("item")
+    ) or "None"
+    chapters_cnt = len(get_merged_episodic_chapters(shared_image_cache_file, chat_memory_file, channel_id))
+    embed.add_field(
+        name="🎭 Live Room Blackboard & Storylines",
+        value=f"• **Topic:** *{topic}* | **Vibe:** *{vibe}*\n• **Active Props:** {props} | **Archived Chapters:** `{chapters_cnt}`",
+        inline=False,
+    )
+    return embed
+
+
 # ==============================================================================
 # CROWN JEWEL #4 & COMMAND UX #2-#4: INTERACTIVE DISCORD UI VIEWS & MODALS
 # (WITH STRICT PER-USER OWNERSHIP ISOLATION & ZERO-PII FIREWALL)
@@ -715,24 +900,28 @@ if _HAS_DISCORD_UI:
             )
 
 
-    class DossierMemberSelect(discord.ui.Select):
-        def __init__(self, hub_view: "DossierHubView", candidates: list[str], other_bot_names: set[str]):
+    class HubBotPerspectiveSelect(discord.ui.Select):
+        """Row 0 Dropdown: Switches the active bot perspective inside `/hub` so users & admins can inspect or configure ANY bot."""
+        def __init__(self, hub_view: "DossierHubView"):
             self.hub_view = hub_view
             options = []
-            for uname in candidates[:25]:
-                is_b = any(_extract_base_username(uname) == _extract_base_username(bn) for bn in other_bot_names)
+            for b_name, b_meta in list(hub_view.bot_perspectives.items())[:25]:
+                is_cur = (b_name == hub_view.bot_display_name)
+                ws_ms = b_meta.get("ws_latency_ms", 0.0)
+                desc = f"Active Perspective • {ws_ms:.0f}ms" if (is_cur and ws_ms > 0) else ("Active Perspective" if is_cur else "Click to switch to this bot's perspective")
                 options.append(
                     discord.SelectOption(
-                        label=uname[:95],
-                        value=uname[:95],
-                        emoji="🤖" if is_b else "👤",
-                        description="Fellow Bot Co-Star" if is_b else "Server Member",
+                        label=f"Bot: {b_name}"[:95],
+                        value=b_name[:95],
+                        emoji="🤖",
+                        default=is_cur,
+                        description=desc[:95],
                     )
                 )
             if not options:
-                options.append(discord.SelectOption(label=hub_view.current_target[:95], value=hub_view.current_target[:95]))
+                options.append(discord.SelectOption(label=f"Bot: {hub_view.bot_display_name}"[:95], value=hub_view.bot_display_name[:95], emoji="🤖", default=True))
             super().__init__(
-                placeholder="🔍 Switch Dossier Target (Member or Fellow Bot)...",
+                placeholder="🤖 Switch Bot Perspective (Inspect / Configure Any Bot)...",
                 min_values=1,
                 max_values=1,
                 options=options,
@@ -740,15 +929,53 @@ if _HAS_DISCORD_UI:
             )
 
         async def callback(self, interaction: discord.Interaction):
+            chosen_bot = self.values[0]
+            self.hub_view.switch_bot_perspective(chosen_bot)
+            caller_disp = getattr(interaction.user, "display_name", self.hub_view.current_target)
+            embed = self.hub_view.render_active_mode_embed(caller_name=caller_disp)
+            await interaction.response.edit_message(embed=embed, view=self.hub_view)
+
+
+    class DossierMemberSelect(discord.ui.Select):
+        """Row 1 Dropdown: Switches the target member or fellow bot being inspected under the current bot's perspective."""
+        def __init__(self, hub_view: "DossierHubView", candidates: list[str], all_bot_names: set[str]):
+            self.hub_view = hub_view
+            options = []
+            for uname in candidates[:25]:
+                is_b = any(_extract_base_username(uname) == _extract_base_username(bn) for bn in all_bot_names)
+                options.append(
+                    discord.SelectOption(
+                        label=f"Inspect: {uname}"[:95],
+                        value=uname[:95],
+                        emoji="🤖" if is_b else "👤",
+                        default=(uname == hub_view.current_target),
+                        description="Fellow Bot Co-Star" if is_b else "Server Member Dossier",
+                    )
+                )
+            if not options:
+                options.append(discord.SelectOption(label=f"Inspect: {hub_view.current_target}"[:95], value=hub_view.current_target[:95]))
+            super().__init__(
+                placeholder="🔍 Switch Dossier Target (Member or Fellow Bot)...",
+                min_values=1,
+                max_values=1,
+                options=options,
+                row=1,
+            )
+
+        async def callback(self, interaction: discord.Interaction):
             self.hub_view.current_target = self.values[0]
+            self.hub_view.active_mode = "dossier"
             embed = self.hub_view.build_Target_dossier_embed(self.hub_view.current_target)
             await interaction.response.edit_message(embed=embed, view=self.hub_view)
 
 
     class DossierHubView(discord.ui.View):
         """
-        Command UX #2 — Interactive Multi-Tab Dossier Hub (`[🗂️ Dossier]`, `[🌐 Social Graph]`,
-        `[📖 Chapters]`, `[✏️ Manage My Facts]`, `[⚙️ Admin Panel]`) + Member/Bot Selector Dropdown.
+        Command UX #2 — Interactive Multi-Bot Main Menu & Dossier Hub:
+        - Row 0: `HubBotPerspectiveSelect` (Switch between ANY bot in the server)
+        - Row 1: `DossierMemberSelect` (Switch which member or fellow bot you are inspecting)
+        - Row 2: `[🏠 Main Menu]`, `[🗂️ Dossier]`, `[🌐 Social Graph]`, `[📖 Chapters]`
+        - Row 3: `[✏️ Manage My Facts]`, `[⚙️ Admin Panel]`
         """
         def __init__(
             self,
@@ -763,8 +990,9 @@ if _HAS_DISCORD_UI:
             channel_id: int,
             channel_name: str,
             other_bot_names: set[str],
+            initial_mode: str = "dossier",
         ):
-            super().__init__(timeout=240)
+            super().__init__(timeout=300)
             self.bot_display_name = bot_display_name
             self.current_target = current_target
             self.persona_prompt = persona_prompt
@@ -774,23 +1002,88 @@ if _HAS_DISCORD_UI:
             self.channel_config_file = channel_config_file
             self.channel_id = channel_id
             self.channel_name = channel_name
-            self.other_bot_names = set(other_bot_names or set())
+            self.active_mode = initial_mode
 
-            uprof = load_json_file(user_profiles_file, {})
+            self.bot_perspectives = discover_all_bot_perspectives(
+                shared_image_cache_file=shared_image_cache_file,
+                default_bot_name=bot_display_name,
+                default_user_profiles_file=user_profiles_file,
+                default_channel_config_file=channel_config_file,
+            )
+            self.all_bot_names = set(other_bot_names or set()) | set(self.bot_perspectives.keys())
+            self.other_bot_names = {bn for bn in self.all_bot_names if _extract_base_username(bn) != _extract_base_username(self.bot_display_name)}
+            self._rebuild_select_menus()
+
+        def _rebuild_select_menus(self):
+            for child in list(self.children):
+                if isinstance(child, discord.ui.Select):
+                    self.remove_item(child)
+
+            self.add_item(HubBotPerspectiveSelect(self))
+
+            uprof = load_json_file(self.user_profiles_file, {})
             cands = [k for k in uprof.keys() if isinstance(k, str) and not k.startswith("_")]
-            for ob in self.other_bot_names:
-                if ob and ob not in cands:
-                    cands.append(ob)
-            if current_target and current_target not in cands:
-                cands.insert(0, current_target)
+            for bn in sorted(self.all_bot_names):
+                if bn and _extract_base_username(bn) != _extract_base_username(self.bot_display_name) and bn not in cands:
+                    cands.append(bn)
+            if self.current_target and self.current_target not in cands:
+                cands.insert(0, self.current_target)
             if cands:
-                self.add_item(DossierMemberSelect(self, cands, self.other_bot_names))
+                self.add_item(DossierMemberSelect(self, cands, self.all_bot_names))
+
+        def switch_bot_perspective(self, new_bot_name: str):
+            self.bot_perspectives = discover_all_bot_perspectives(
+                shared_image_cache_file=self.shared_image_cache_file,
+                default_bot_name=self.bot_display_name,
+                default_user_profiles_file=self.user_profiles_file,
+                default_channel_config_file=self.channel_config_file,
+            )
+            b_meta = self.bot_perspectives.get(new_bot_name)
+            if b_meta:
+                self.bot_display_name = b_meta["bot_name"]
+                self.user_profiles_file = b_meta["user_profiles_file"]
+                self.channel_config_file = b_meta["channel_config_file"]
+                self.other_bot_names = {
+                    bn for bn in self.all_bot_names
+                    if _extract_base_username(bn) != _extract_base_username(self.bot_display_name)
+                }
+            self._rebuild_select_menus()
+
+        def render_active_mode_embed(self, caller_name: str = "") -> discord.Embed:
+            if self.active_mode == "menu":
+                return build_fleet_main_menu_embed(
+                    shared_image_cache_file=self.shared_image_cache_file,
+                    chat_memory_file=self.chat_memory_file,
+                    channel_id=self.channel_id,
+                    channel_name=self.channel_name,
+                    active_bot_name=self.bot_display_name,
+                    bot_perspectives=self.bot_perspectives,
+                    caller_name=caller_name or self.current_target,
+                )
+            if self.active_mode == "social":
+                uprof = load_json_file(self.user_profiles_file, {})
+                return build_social_graph_embed(
+                    bot_display_name=self.bot_display_name,
+                    user_profiles=uprof,
+                    other_bot_names=self.other_bot_names,
+                    persona_prompt="",
+                )
+            if self.active_mode == "chapters":
+                chapters = get_merged_episodic_chapters(
+                    self.shared_image_cache_file, self.chat_memory_file, self.channel_id
+                )
+                return build_episodic_chapters_embed(
+                    bot_display_name=self.bot_display_name,
+                    channel_name=self.channel_name,
+                    chapters_list=chapters,
+                )
+            return self.build_Target_dossier_embed(self.current_target)
 
         def build_Target_dossier_embed(self, target_name: str) -> discord.Embed:
             uprof = load_json_file(self.user_profiles_file, {})
-            canon = find_canonical_username(target_name, uprof, {target_name} | self.other_bot_names)
+            canon = find_canonical_username(target_name, uprof, {target_name} | self.all_bot_names)
             facts = uprof.get(canon, []) if isinstance(uprof.get(canon), list) else []
-            is_b = any(_extract_base_username(canon) == _extract_base_username(bn) for bn in self.other_bot_names)
+            is_b = any(_extract_base_username(canon) == _extract_base_username(bn) for bn in self.all_bot_names)
             scache = load_json_file(self.shared_image_cache_file, {})
             last_seen_map = scache.get("_user_last_seen_ts", {}) if isinstance(scache.get("_user_last_seen_ts"), dict) else {}
             last_ts = last_seen_map.get(canon.lower()) or last_seen_map.get(_extract_base_username(canon))
@@ -799,28 +1092,38 @@ if _HAS_DISCORD_UI:
                 target_canon=canon,
                 facts=facts,
                 is_target_bot=is_b,
-                persona_prompt=self.persona_prompt,
+                persona_prompt="",
                 last_seen_ts=last_ts,
             )
 
-        @discord.ui.button(label="🗂️ Dossier", style=discord.ButtonStyle.primary, row=1)
+        @discord.ui.button(label="🏠 Main Menu", style=discord.ButtonStyle.success, row=2)
+        async def tab_main_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.active_mode = "menu"
+            caller_disp = getattr(interaction.user, "display_name", self.current_target)
+            embed = self.render_active_mode_embed(caller_name=caller_disp)
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        @discord.ui.button(label="🗂️ Dossier", style=discord.ButtonStyle.primary, row=2)
         async def tab_dossier(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.active_mode = "dossier"
             embed = self.build_Target_dossier_embed(self.current_target)
             await interaction.response.edit_message(embed=embed, view=self)
 
-        @discord.ui.button(label="🌐 Social Graph", style=discord.ButtonStyle.secondary, row=1)
+        @discord.ui.button(label="🌐 Social Graph", style=discord.ButtonStyle.secondary, row=2)
         async def tab_social(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.active_mode = "social"
             uprof = load_json_file(self.user_profiles_file, {})
             embed = build_social_graph_embed(
                 bot_display_name=self.bot_display_name,
                 user_profiles=uprof,
                 other_bot_names=self.other_bot_names,
-                persona_prompt=self.persona_prompt,
+                persona_prompt="",
             )
             await interaction.response.edit_message(embed=embed, view=self)
 
-        @discord.ui.button(label="📖 Chapters", style=discord.ButtonStyle.secondary, row=1)
+        @discord.ui.button(label="📖 Chapters", style=discord.ButtonStyle.secondary, row=2)
         async def tab_chapters(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.active_mode = "chapters"
             chapters = get_merged_episodic_chapters(
                 self.shared_image_cache_file, self.chat_memory_file, self.channel_id
             )
@@ -831,18 +1134,18 @@ if _HAS_DISCORD_UI:
             )
             await interaction.response.edit_message(embed=embed, view=self)
 
-        @discord.ui.button(label="✏️ Manage My Facts", style=discord.ButtonStyle.success, row=2)
+        @discord.ui.button(label="✏️ Manage My Facts", style=discord.ButtonStyle.success, row=3)
         async def btn_manage_own_facts(self, interaction: discord.Interaction, button: discord.ui.Button):
-            # STRICT CALLER ISOLATION: Always binds to interaction.user.display_name!
+            # STRICT CALLER ISOLATION: Always binds to interaction.user.display_name on the currently selected bot!
             caller_name = getattr(interaction.user, "display_name", "User")
             view = EphemeralFactManageView(self.user_profiles_file, caller_name)
             await interaction.response.send_message(
-                f"🔒 **Private Fact Manager for {caller_name}** (You can only view, add, or delete facts on your own profile):",
+                f"🔒 **Private Fact Manager for {caller_name}** (Viewing/editing your profile on **{self.bot_display_name}**):",
                 view=view,
                 ephemeral=True,
             )
 
-        @discord.ui.button(label="⚙️ Admin Panel", style=discord.ButtonStyle.secondary, row=2)
+        @discord.ui.button(label="⚙️ Admin Panel", style=discord.ButtonStyle.secondary, row=3)
         async def btn_admin_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
             if not getattr(getattr(interaction.user, "guild_permissions", None), "administrator", False):
                 await interaction.response.send_message(
@@ -905,10 +1208,15 @@ if _HAS_DISCORD_UI:
 
         @discord.ui.button(label="🔄 Redraw", style=discord.ButtonStyle.primary)
         async def redraw_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-            if self._redraw_count >= 3:
-                await interaction.response.send_message("⏳ Redraw limit (3) reached for this image.", ephemeral=True)
+            is_admin = bool(getattr(getattr(interaction.user, "guild_permissions", None), "administrator", False))
+            if not is_admin and self._redraw_count >= 3:
+                await interaction.response.send_message(
+                    "⏳ Redraw limit (3) reached for non-admin members on this image.",
+                    ephemeral=True,
+                )
                 return
-            self._redraw_count += 1
+            if not is_admin:
+                self._redraw_count += 1
             await interaction.response.defer()
             from ai_services import generate_image_attachment
 
@@ -1063,6 +1371,26 @@ async def handle_bot_commands(
             f"• `@{client.user.display_name} admin forget <keyword>` / `!clearmemory`"
         )
         await message.channel.send(help_msg)
+        return True
+
+    if "!hub" in content_lower:
+        hub_view = _make_hub_view(message.author.display_name)
+        if hub_view is not None:
+            hub_view.active_mode = "menu"
+            embed = hub_view.render_active_mode_embed(caller_name=message.author.display_name)
+            await message.channel.send(embed=embed, view=hub_view)
+        else:
+            persp = discover_all_bot_perspectives(shared_image_cache_file, client.user.display_name, user_profiles_file, channel_config_file)
+            embed = build_fleet_main_menu_embed(
+                shared_image_cache_file=shared_image_cache_file,
+                chat_memory_file=chat_memory_file,
+                channel_id=channel_id,
+                channel_name=getattr(message.channel, "name", str(channel_id)),
+                active_bot_name=client.user.display_name,
+                bot_perspectives=persp,
+                caller_name=message.author.display_name,
+            )
+            await message.channel.send(embed=embed)
         return True
 
     if "!whoami" in content_lower:
@@ -1537,30 +1865,12 @@ def register_hub_slash_command(
             )
             other_b_names = {ob.get("display_name", "") for ob in other_b_meta if ob.get("display_name")}
 
-            uprof = load_json_file(user_profiles_file, {})
             clean_target = re.sub(r"<@!?\d+>", "", (target or "")).strip().lstrip("@").strip()
+            init_mode = "dossier" if clean_target else "menu"
+            uprof = load_json_file(user_profiles_file, {})
             target_lookup = clean_target if clean_target else caller_disp
             canon = find_canonical_username(
                 target_lookup, uprof, {target_lookup, caller_disp} | other_b_names
-            )
-            facts = uprof.get(canon, [])
-            is_target_bot = any(_extract_base_username(canon) == _extract_base_username(bn) for bn in other_b_names)
-
-            scache = load_json_file(shared_image_cache_file, {})
-            last_seen_map = scache.get("_user_last_seen_ts", {}) if isinstance(scache.get("_user_last_seen_ts"), dict) else {}
-            last_seen_ts = (
-                last_seen_map.get(canon.lower())
-                or last_seen_map.get(_extract_base_username(canon))
-                or (uprof.get("_last_seen", {}) if isinstance(uprof.get("_last_seen"), dict) else {}).get(canon)
-            )
-
-            embed = build_whoami_embed(
-                bot_display_name=bot_disp,
-                target_canon=canon,
-                facts=facts if isinstance(facts, list) else [],
-                is_target_bot=is_target_bot,
-                persona_prompt=system_prompt.get("content", ""),
-                last_seen_ts=last_seen_ts,
             )
 
             view = None
@@ -1577,9 +1887,32 @@ def register_hub_slash_command(
                         channel_id=ch_id,
                         channel_name=ch_name,
                         other_bot_names=other_b_names,
+                        initial_mode=init_mode,
                     )
+                    # If the user passed a fellow bot's name in `target`, switch the hub's active bot perspective to that bot!
+                    if clean_target:
+                        for b_cand in list(view.bot_perspectives.keys()):
+                            if _extract_base_username(b_cand) == _extract_base_username(clean_target):
+                                view.switch_bot_perspective(b_cand)
+                                view.current_target = caller_disp
+                                view.active_mode = "menu"
+                                break
                 except Exception:
                     view = None
+
+            if view is not None:
+                embed = view.render_active_mode_embed(caller_name=caller_disp)
+            else:
+                persp = discover_all_bot_perspectives(shared_image_cache_file, bot_disp, user_profiles_file, channel_config_file)
+                embed = build_fleet_main_menu_embed(
+                    shared_image_cache_file=shared_image_cache_file,
+                    chat_memory_file=chat_memory_file,
+                    channel_id=ch_id,
+                    channel_name=ch_name,
+                    active_bot_name=bot_disp,
+                    bot_perspectives=persp,
+                    caller_name=caller_disp,
+                )
 
             if view is not None:
                 await interaction.followup.send(embed=embed, view=view, ephemeral=bool(private))
